@@ -451,11 +451,16 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 
 
   //  double *pa,
-  double *pco, *pdytemp, *pytemp;
+  double *pco = NULL, *pdytemp = NULL, *pytemp = NULL;
 
   err = cudaMalloc(&pco, (size_t)(CUDA_Grid_dim_precalc) * (lmfit + 1) * (lmfit + 2) * sizeof(double));
   err = cudaMalloc(&pdytemp, (size_t)(CUDA_Grid_dim_precalc + 1) * (max_lp + 1) * DYT_STRIDE * sizeof(double));
   err = cudaMalloc(&pytemp, (size_t)CUDA_Grid_dim_precalc * (max_lp + 1) * sizeof(double));
+  if(err != cudaSuccess || pco == NULL || pdytemp == NULL || pytemp == NULL)
+    {
+      fprintf(stderr, "CUDA: precalc scratch allocation failed (%s)\n", cudaGetErrorString(err));
+      exit(4);
+    }
 
   for(m = 0; m < CUDA_Grid_dim_precalc; m++)
     {
@@ -653,7 +658,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	  for(int p = 0; p < N_POLES; p++)
 	    {
 	      int b = m * N_POLES + p;
-	      if(isReported[b] == 1 && (best < 0 || dev_best[b] < dev_best[best]))
+	      if(isReported[b] == 1 && (best < 0 || (!isnan(dev_best[b]) && !(dev_best[b] >= dev_best[best]))))
 		best = b;
 	    }
 	  if(best >= 0)
@@ -705,8 +710,13 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 		    + (size_t)(ma_est + 1) * (ma_est + 2)) * sizeof(double) + sizeof(freq_context);
   size_t reserve = 96u * 1024 * 1024;
   size_t budget = (freeB > reserve) ? (size_t)((double)(freeB - reserve) * 0.9) : 0;
-  while(batch_freqs > 4 && (size_t)(batch_freqs * N_POLES + 33) * per_bid > budget)
-    batch_freqs--;
+  while(batch_freqs > 4)
+    {
+      int g = 128 * ((batch_freqs * N_POLES + 127) / 128);
+      if((size_t)(g + 33) * per_bid <= budget)
+	break;
+      batch_freqs--;
+    }
 
   // split the frequencies into equally sized batches (a 409+87 split wastes
   // most of the GPU on the tail batch; 248+248 keeps both full)
@@ -819,12 +829,17 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
   size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(double);
 
 
-  double *pco, *pdytemp, *pytemp;
+  double *pco = NULL, *pdytemp = NULL, *pytemp = NULL;
 
   err = cudaMalloc(&pco, (size_t)CUDA_grid_dim * (lmfit + 1) * (lmfit + 1) * sizeof(double));
   // dytemp/ytemp are per-curve scratch, sized by the longest curve rather than ndata
   err = cudaMalloc(&pdytemp, (size_t)(CUDA_grid_dim + 1) * (max_lp + 1) * DYT_STRIDE * sizeof(double));
   err = cudaMalloc(&pytemp, (size_t)CUDA_grid_dim * (max_lp + 1) * sizeof(double));
+  if(err != cudaSuccess || pco == NULL || pdytemp == NULL || pytemp == NULL)
+    {
+      fprintf(stderr, "CUDA: scratch allocation failed (%s); grid %d\n", cudaGetErrorString(err), CUDA_grid_dim);
+      exit(4);
+    }
 
   for(m = 0; m < CUDA_grid_dim; m++)
     {
@@ -1075,7 +1090,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	  for(int p = 0; p < N_POLES; p++)
 	    {
 	      int b = m * N_POLES + p;
-	      if(isReported[b] == 1 && (best < 0 || dev_best[b] < dev_best[best]))
+	      if(isReported[b] == 1 && (best < 0 || (!isnan(dev_best[b]) && !(dev_best[b] >= dev_best[best]))))
 		best = b;
 	    }
 	  if(best >= 0)

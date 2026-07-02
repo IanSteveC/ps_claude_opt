@@ -2525,7 +2525,7 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	  if(tid == 0)
 	    {
 	      int pos = lastone;
-	      for(int m = lastone; m < l; m++)
+	      for(int m = lastone; m <= l; m++) /* include the row's own diagonal term */
 		{
 		  if(CUDA_ia[m + 1])
 		    {
