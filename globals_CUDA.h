@@ -90,15 +90,19 @@ __device__ extern double CUDA_ee[3][MAX_N_OBS+1];
 __device__ extern double CUDA_ee0[3][MAX_N_OBS+1]; 
 
 
+// dytemp is transposed since the 2026 rewrite: row = data point, column = parameter,
+// row stride DYT_STRIDE doubles (ma <= 63 is asserted on the host).
+#define DYT_STRIDE 64
+
 //global to one thread
 struct freq_context
 {
-  double *Dg;
+  double *Dg;   // unused since the DsphT rewrite (kept for struct/copy layout)
   //double *alpha;
   double *covar;
   double *dytemp;
   double *ytemp;
-  
+
   //double cg[MAX_N_PAR + 1];
   //double beta[MAX_N_PAR + 1];
   double da[MAX_N_PAR + 1];

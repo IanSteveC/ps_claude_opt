@@ -1,5 +1,7 @@
 #pragma once
 
+__global__ void CudaBuildDsphT(void);
+
 __global__ void CudaCalculatePrepare(int n_start, int n_max);
 
 //__global__ void CudaCalculatePreparePole(int m, double freq_start, double freq_step, int n);
