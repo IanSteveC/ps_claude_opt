@@ -1,0 +1,116 @@
+# This should work on Linux.  Modify as needed for other platforms.
+
+BOINC_DIR = ../../boinc
+BOINC_API_DIR = $(BOINC_DIR)/api
+BOINC_LIB_DIR = $(BOINC_DIR)/lib
+
+
+CUDA_PATH = /usr/local/cuda-12.9
+
+CXXFLAGS = -g -O3 \
+	-I$(BOINC_DIR) \
+	-I$(BOINC_LIB_DIR) \
+	-I$(BOINC_API_DIR) \
+	-I$(CUDA_PATH)/include \
+	-L.
+
+
+#	-L /usr/X11R6/lib \
+
+# There were two cases from the legacy code - first was using --maxrregcount=80 which is very ineficient on block occupancy.
+# After precise examination on results from NVIDIA Nsight Performance Analysis both are set to 32 now. This way we achieve 100% block occupancy (most of the time).
+# 28 APR 2020 - Temporaryly '--maxrregcount' is set back to '80' for the NVCCFLAGS until further research proves it needs to be set back to '32' 
+
+# CUDA 5.5: NVCCFLAGS = --ptxas-options=-v --generate-code arch=compute_20,code=sm_20 --generate-code arch=compute_20,code=sm_21 --generate-code arch=compute_30,code=sm_30 --generate-code arch=compute_35,code=sm_35 --generate-code arch=compute_35,code=compute_35 --maxrregcount=80 -rdc=true
+# CUDA 10.2 - CC: compute_30,sm_30;compute_35,sm_35;compute_37,sm_37;compute_50,sm_50;compute_52,sm_52;compute_60,sm_60;compute_61,sm_61;compute_70,sm_70;compute_75,sm_75
+# CUDA 11.1 - CC: compute_52,sm_52;compute_60,sm_60;compute_61,sm_61;compute_70,sm_70;compute_75,sm_75;compute_80,sm_80;compute_86,sm_86
+# CUDA 11.8 - CC:
+#VCCFLAGS = --forward-unknown-opts -mcmodel=medium --split-compile-extended 25 -O3 -lineinfo --use_fast_math --extra-device-vectorization --ptxas-options="-v -O3 --register-usage-level 0 " -t0 -O3 -gencode=arch=compute_86,code=sm_86 --generate-code arch=compute_50,code=sm_50 --generate-code arch=compute_52,code=sm_52 --generate-code arch=compute_53,code=sm_53 --generate-code arch=compute_60,code=sm_60 --generate-code arch=compute_61,code=sm_61 --generate-code arch=compute_62,code=sm_62 --generate-code arch=compute_70,code=sm_70 --generate-code arch=compute_72,code=sm_72 --generate-code arch=compute_75,code=sm_75 --generate-code arch=compute_80,code=sm_80 --generate-code arch=compute_87,code=sm_87 --generate-code arch=compute_89,code=sm_89 --maxrregcount=128 -rdc=true
+
+NVCCFLAGS = --forward-unknown-opts -mcmodel=medium --split-compile-extended 25 -O3 -lineinfo --use_fast_math --extra-device-vectorization --ptxas-options="-v -O3 --register-usage-level 0 " -t0 -O3 --generate-code arch=compute_50,code=[lto_50,sm_50] --generate-code arch=compute_52,code=[lto_52,sm_52] --generate-code arch=compute_60,code=[lto_60,sm_60] --generate-code arch=compute_61,code=[lto_61,sm_61] --generate-code arch=compute_70,code=[lto_70,sm_70] --generate-code arch=compute_75,code=[lto_75,sm_75] --generate-code arch=compute_80,code=[lto_80,sm_80] --generate-code arch=compute_86,code=[lto_86,sm_86] --generate-code arch=compute_89,code=[lto_89,sm_89] --generate-code arch=compute_90,code=[lto_90,sm_90] --generate-code arch=compute_100,code=[lto_100,sm_100] --generate-code arch=compute_120,code=[lto_120,sm_120] --maxrregcount=32 -rdc=true
+
+CC=g++
+CXX=g++
+OPTFLAGS=-O3
+CFLAGS=$(OPTFLAGS) -Wall -mcmodel=medium
+LDFLAGS=-dlto -lm -lcudadevrt -lcudart_static -lrt -pthread -ldl -lc -lpthread -Bstatic -lgcc -lstdc++ -Xlinker -rpath -mcmodel=medium .
+
+
+MY_LIBS=trifac.o areanorm.o sphfunc.o ellfit.o ludcmp.o lubksb.o \
+		covsrt.o memory.o\
+		dot_product.o pscuda.device-link.o start_CUDA.o Start.o\
+		ComputeCapability.o
+
+PROGS = period_search_BOINC_cuda12000
+
+all: $(PROGS)
+
+libstdc++.a:
+	ln -s `g++ -print-file-name=libstdc++.a`
+
+libcudart_static.a:
+	ln -s $(CUDA_PATH)/lib64/libcudart_static.a libcudart_static.a
+
+libcudadevrt.a:
+	ln -s $(CUDA_PATH)/lib64/libcudart_static.a libcudadevrt.a
+
+libcudart.so:
+	ln -s $(CUDA_PATH)/lib64/libcudart.so libcudart.so
+
+libcuda.so:
+	ln -s $(CUDA_PATH)/lib64/stubs/libcuda.so libcuda.so
+
+#libnvml.so:
+libnvidia-ml.so:
+	ln -s $(CUDA_PATH)/lib64/stubs/libnvidia-ml.so libnvidia-ml.so
+
+clean:
+	/bin/rm -f $(PROGS) *.o libstdc++.a libcudart.so libcuda.so
+
+distclean:
+	/bin/rm -f $(PROGS) *.o libstdc++.a libcudart.so libcuda.so
+
+install: period_search_BOINC_cuda12000
+
+# specify library paths explicitly (rather than -l)
+# because otherwise you might get a version in /usr/lib etc.
+
+## period_search_BOINC_cuda12000: period_search_BOINC.o $(MY_LIBS) libstdc++.a $(BOINC_API_DIR)/libboinc_api.a $(BOINC_LIB_DIR)/libboinc.a libcudart.so libcuda.so libnvidia-ml.so
+period_search_BOINC_cuda12000: period_search_BOINC.o $(MY_LIBS) libstdc++.a $(BOINC_API_DIR)/libboinc_api.a $(BOINC_LIB_DIR)/libboinc.a libcudart_static.a libcudadevrt.a 
+	$(CXX) $(CXXFLAGS) -o $@ $(MY_LIBS) $< libstdc++.a -pthread \
+	$(BOINC_API_DIR)/libboinc_api.a \
+	$(BOINC_LIB_DIR)/libboinc.a $(LDFLAGS) \
+	$(CUDA_PATH)/lib64/libcudart_static.a \
+	$(CUDA_PATH)/lib64/stubs/libcuda.so \
+	$(CUDA_PATH)/lib64/libcudadevrt.a 
+#	$(CUDA_PATH)/lib64/stubs/libnvidia-ml.so \
+#$(CUDA_PATH)/lib64/stubs/libcuda.so \
+#$(CUDA_PATH)/lib64/libcudart.so \
+
+
+ComputeCapability.o: ComputeCapability.cu
+	$(CUDA_PATH)/bin/nvcc --compiler-bindir=/usr/bin/gcc $(OPTIMIZATION) \
+		$(NVCCFLAGS) \
+		--compiler-options="$(CXXFLAGS)" \
+		--compile ComputeCapability.cu
+
+start_CUDA.o: start_CUDA.cu
+	$(CUDA_PATH)/bin/nvcc --compiler-bindir=/usr/bin/gcc $(OPTIMIZATION) \
+		$(NVCCFLAGS) \
+		--compiler-options="$(CXXFLAGS)" \
+		--compile start_CUDA.cu
+
+Start.o: Start.cu
+	$(CUDA_PATH)/bin/nvcc --compiler-bindir=/usr/bin/gcc $(OPTIMIZATION) \
+		$(NVCCFLAGS) \
+		--compiler-options="$(CXXFLAGS)" \
+		--compile Start.cu
+
+pscuda.device-link.o: start_CUDA.o Start.o ComputeCapability.o
+	$(CUDA_PATH)/bin/nvcc -dlink -o pscuda.device-link.o --compiler-bindir=/usr/bin/gcc $(OPTIMIZATION) \
+		$(NVCCFLAGS) \
+		--compiler-options="$(CXXFLAGS)" \
+	start_CUDA.o Start.o ComputeCapability.o
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c $<
