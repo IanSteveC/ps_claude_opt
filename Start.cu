@@ -1993,7 +1993,12 @@ __device__ int __forceinline__ gauss_errc(freq_context * __restrict__ CUDA_LCC, 
 // curve2 tile reads are coalesced. curve2 accumulates alpha once per K-point
 // tile (rank-K update from shared memory) instead of per point.
 
-__device__ double CUDA_DsphT[MAX_N_FAC + 2][DYT_STRIDE];
+__device__ __align__(128) double CUDA_DsphT[MAX_N_FAC + 2][DYT_STRIDE];
+/* float mirror for the bright() derivative sweep: the Jacobian tolerates
+   1e-7 relative rounding of the constant spherical-harmonics basis, and the
+   74KB float matrix is L1-resident where the double one was not; all
+   accumulation stays FP64 */
+__device__ __align__(128) float CUDA_DsphTf[MAX_N_FAC + 2][DYT_STRIDE];
 
 __global__ void CudaBuildDsphT(void)
 {
@@ -2003,6 +2008,109 @@ __global__ void CudaBuildDsphT(void)
   if(c <= MAX_N_PAR)
     v = CUDA_Dsph[c][f];
   CUDA_DsphT[f][c] = v;
+  CUDA_DsphTf[f][c] = (float)v;
+}
+
+// per-point geometry for curve1: identical in every lane (inputs are uniform),
+// results parked in shared by lane 0 so nothing survives in registers.
+// layout of po[26]: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha
+__device__ void __forceinline__ curve1_point_geometry(int lnp,
+						      double const * __restrict__ inv,
+						      double * __restrict__ po)
+{
+  double ee_1  = CUDA_ee[0][lnp];
+  double ee0_1 = CUDA_ee0[0][lnp];
+  double ee_2  = CUDA_ee[1][lnp];
+  double ee0_2 = CUDA_ee0[1][lnp];
+  double ee_3  = CUDA_ee[2][lnp];
+  double ee0_3 = CUDA_ee0[2][lnp];
+  double t = CUDA_tim[lnp];
+
+  double alph = acos(((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3);
+  double f = inv[0] * t + CUDA_Phi_0;
+  double ff = exp2(-1.44269504088896 * (alph * inv[2]));
+  f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
+  double scale = 1.0 + inv[1] * ff + inv[3] * alph;
+  double d2 = inv[1] * ff * alph * inv[4];
+
+  double sf, cf;
+  __builtin_assume(f > (-2.0 * PI) && f < (2.0 * PI));
+  sincos(f, &sf, &cf);
+
+  double Blmat02 = inv[7], Blmat22 = inv[8], Blmat10 = inv[9], Blmat11 = inv[10];
+  double Blmat00 = Blmat11 * Blmat22;
+  double Blmat01 = Blmat22 * -Blmat10;
+  double msf = -sf;
+  double cbl00 = cf * Blmat00;
+  double sbl10 = sf * Blmat10;
+  double cbl10 = cf * Blmat10;
+  double sbl11 = sf * Blmat11;
+  double cbl11 = cf * Blmat11;
+  double cbl01 = cf * Blmat01;
+  double sbl00 = msf * Blmat00;
+  double sbl01 = msf * Blmat01;
+
+  double gde020 = Blmat00 * ee_1 + Blmat01 * ee_2 + Blmat02 * ee_3;
+  double gde120 = Blmat00 * ee0_1 + Blmat01 * ee0_2 + Blmat02 * ee0_3;
+
+  double tmat41 = -cbl01 - sbl11;
+  double tmat51 = -sbl01 - cbl11;
+  double tmat42 = cbl00 + sbl10;
+  double tmat52 = sbl00 + cbl10;
+
+  double gde001 = tmat41 * ee_1 + tmat42 * ee_2;
+  double gde101 = tmat41 * ee0_1 + tmat42 * ee0_2;
+  double gde011 = tmat51 * ee_1 + tmat52 * ee_2;
+  double gde111 = tmat51 * ee0_1 + tmat52 * ee0_2;
+
+  double tmat01 = cbl00 + sbl10;
+  double tmat11 = sbl00 + cbl10;
+  double tmat02 = cbl01 + sbl11;
+  double tmat12 = sbl01 + cbl11;
+  double tmat03 = cf  * Blmat02;
+  double tmat13 = msf * Blmat02;
+
+  double ge00 = tmat01 * ee_1 + tmat02 * ee_2 + tmat03 * ee_3;
+  double ge10 = tmat01 * ee0_1 + tmat02 * ee0_2 + tmat03 * ee0_3;
+  double ge01 = tmat11 * ee_1 + tmat12 * ee_2 + tmat13 * ee_3;
+  double ge11 = tmat11 * ee0_1 + tmat12 * ee0_2 + tmat13 * ee0_3;
+
+  double Blmat20 = Blmat11 * -Blmat02;
+  double Blmat21 = Blmat02 * Blmat10;
+  double gde002 = t * ge01;
+  double gde102 = t * ge11;
+  double gde012 = -t * ge00;
+  double gde112 = -t * ge10;
+
+  double ge02 = Blmat20 * ee_1 + Blmat21 * ee_2 + Blmat22 * ee_3;
+  double ge12 = Blmat20 * ee0_1 + Blmat21 * ee0_2 + Blmat22 * ee0_3;
+  double gde021 = -Blmat21 * ee_1 + Blmat20 * ee_2;
+  double gde121 = -Blmat21 * ee0_1 + Blmat20 * ee0_2;
+
+  double tmat31 = sf * Blmat20;
+  double tmat32 = sf * Blmat21;
+  double tmat33 = sf * Blmat22;
+  double tmat21 = cf * -Blmat20;
+  double tmat22 = cf * -Blmat21;
+  double tmat23 = cf * -Blmat22;
+
+  double gde000 = tmat21 * ee_1 + tmat22 * ee_2 + tmat23 * ee_3;
+  double gde100 = tmat21 * ee0_1 + tmat22 * ee0_2 + tmat23 * ee0_3;
+  double gde010 = tmat31 * ee_1 + tmat32 * ee_2 + tmat33 * ee_3;
+  double gde110 = tmat31 * ee0_1 + tmat32 * ee0_2 + tmat33 * ee0_3;
+
+  if(threadIdx.x == 0)
+    {
+      po[0] = gde000;  po[1] = gde010;  po[2] = gde020;
+      po[3] = gde100;  po[4] = gde110;  po[5] = gde120;
+      po[6] = gde001;  po[7] = gde011;  po[8] = gde021;
+      po[9] = gde101;  po[10] = gde111; po[11] = gde121;
+      po[12] = gde002; po[13] = gde012;
+      po[14] = gde102; po[15] = gde112;
+      po[16] = ge00;   po[17] = ge01;   po[18] = ge02;
+      po[19] = ge10;   po[20] = ge11;   po[21] = ge12;
+      po[22] = scale;  po[23] = ff;     po[24] = d2;   po[25] = alph;
+    }
 }
 
 // warp-cooperative bright()+derivatives for one relative (Inrel==1) lightcurve:
@@ -2017,9 +2125,11 @@ __global__ void CudaBuildDsphT(void)
 
 struct c1share
 {
-  double wc[32];   /* compacted visible-facet weights */
-  int    fc[32];   /* compacted facet indices */
-  double pt[26];   /* per-point geometry: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha */
+  double wcA[32];  /* compacted visible-facet weights, point A */
+  double wcB[32];  /* compacted visible-facet weights, point B */
+  int    fc[32];   /* compacted facet indices (union of A/B visibility) */
+  double ptA[26];  /* per-point geometry: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha */
+  double ptB[26];
   double inv[11];  /* invariants: 0..4 phase model, 5 cl, 6 cls, 7..10 Blmat */
 };
 
@@ -2042,11 +2152,15 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 						  c1share * __restrict__ shw)
 {
   int tid = threadIdx.x;
-  /* per-warp staging keeps every warp-uniform value out of per-thread
-     registers (occupancy is register-bound) */
-  double * __restrict__ wc = shw->wc;
+  /* two points (A = jp, B = jp+1) share every DsphT row load: the derivative
+     sweep is the dominant L2 stream, so pairing halves it. Point A's math and
+     summation order are identical to the single-point version; facets visible
+     only to one point contribute an exact 0.0 to the other. */
+  double * __restrict__ wcA = shw->wcA;
+  double * __restrict__ wcB = shw->wcB;
   int    * __restrict__ fc = shw->fc;
-  double * __restrict__ pt = shw->pt;
+  double * __restrict__ ptA = shw->ptA;
+  double * __restrict__ ptB = shw->ptB;
   double * __restrict__ inv = shw->inv;
 
   int nc = CUDA_ncoef0;
@@ -2083,160 +2197,99 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   double * __restrict__ ytemp = CUDA_LCC->ytemp;
 
 #pragma unroll 1
-  for(int jp = 0; jp < Lpoints; jp++)
+  for(int jp = 0; jp < Lpoints; jp += 2)
     {
-      { /* geometry: identical in every lane (same math as the original);
-	   every output is parked in shared so only the accumulators stay
-	   in registers across the facet loop */
-	int lnp = lnp0 + jp;
+      int haveB = (jp + 1 < Lpoints);
 
-	double ee_1  = CUDA_ee[0][lnp];
-	double ee0_1 = CUDA_ee0[0][lnp];
-	double ee_2  = CUDA_ee[1][lnp];
-	double ee0_2 = CUDA_ee0[1][lnp];
-	double ee_3  = CUDA_ee[2][lnp];
-	double ee0_3 = CUDA_ee0[2][lnp];
-	double t = CUDA_tim[lnp];
-
-	double alph = acos(((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3);
-	double f = inv[0] * t + CUDA_Phi_0;
-	double ff = exp2(-1.44269504088896 * (alph * inv[2]));
-	f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
-	double scale = 1.0 + inv[1] * ff + inv[3] * alph;
-	double d2 = inv[1] * ff * alph * inv[4];
-
-	double sf, cf;
-	__builtin_assume(f > (-2.0 * PI) && f < (2.0 * PI));
-	sincos(f, &sf, &cf);
-
-	double Blmat02 = inv[7], Blmat22 = inv[8], Blmat10 = inv[9], Blmat11 = inv[10];
-	double Blmat00 = Blmat11 * Blmat22;
-	double Blmat01 = Blmat22 * -Blmat10;
-	double msf = -sf;
-	double cbl00 = cf * Blmat00;
-	double sbl10 = sf * Blmat10;
-	double cbl10 = cf * Blmat10;
-	double sbl11 = sf * Blmat11;
-	double cbl11 = cf * Blmat11;
-	double cbl01 = cf * Blmat01;
-	double sbl00 = msf * Blmat00;
-	double sbl01 = msf * Blmat01;
-
-	double gde020 = Blmat00 * ee_1 + Blmat01 * ee_2 + Blmat02 * ee_3;
-	double gde120 = Blmat00 * ee0_1 + Blmat01 * ee0_2 + Blmat02 * ee0_3;
-
-	double tmat41 = -cbl01 - sbl11;
-	double tmat51 = -sbl01 - cbl11;
-	double tmat42 = cbl00 + sbl10;
-	double tmat52 = sbl00 + cbl10;
-
-	double gde001 = tmat41 * ee_1 + tmat42 * ee_2;
-	double gde101 = tmat41 * ee0_1 + tmat42 * ee0_2;
-	double gde011 = tmat51 * ee_1 + tmat52 * ee_2;
-	double gde111 = tmat51 * ee0_1 + tmat52 * ee0_2;
-
-	double tmat01 = cbl00 + sbl10;
-	double tmat11 = sbl00 + cbl10;
-	double tmat02 = cbl01 + sbl11;
-	double tmat12 = sbl01 + cbl11;
-	double tmat03 = cf  * Blmat02;
-	double tmat13 = msf * Blmat02;
-
-	double ge00 = tmat01 * ee_1 + tmat02 * ee_2 + tmat03 * ee_3;
-	double ge10 = tmat01 * ee0_1 + tmat02 * ee0_2 + tmat03 * ee0_3;
-	double ge01 = tmat11 * ee_1 + tmat12 * ee_2 + tmat13 * ee_3;
-	double ge11 = tmat11 * ee0_1 + tmat12 * ee0_2 + tmat13 * ee0_3;
-
-	double Blmat20 = Blmat11 * -Blmat02;
-	double Blmat21 = Blmat02 * Blmat10;
-	double gde002 = t * ge01;
-	double gde102 = t * ge11;
-	double gde012 = -t * ge00;
-	double gde112 = -t * ge10;
-
-	double ge02 = Blmat20 * ee_1 + Blmat21 * ee_2 + Blmat22 * ee_3;
-	double ge12 = Blmat20 * ee0_1 + Blmat21 * ee0_2 + Blmat22 * ee0_3;
-	double gde021 = -Blmat21 * ee_1 + Blmat20 * ee_2;
-	double gde121 = -Blmat21 * ee0_1 + Blmat20 * ee0_2;
-
-	double tmat31 = sf * Blmat20;
-	double tmat32 = sf * Blmat21;
-	double tmat33 = sf * Blmat22;
-	double tmat21 = cf * -Blmat20;
-	double tmat22 = cf * -Blmat21;
-	double tmat23 = cf * -Blmat22;
-
-	double gde000 = tmat21 * ee_1 + tmat22 * ee_2 + tmat23 * ee_3;
-	double gde100 = tmat21 * ee0_1 + tmat22 * ee0_2 + tmat23 * ee0_3;
-	double gde010 = tmat31 * ee_1 + tmat32 * ee_2 + tmat33 * ee_3;
-	double gde110 = tmat31 * ee0_1 + tmat32 * ee0_2 + tmat33 * ee0_3;
-
-	if(tid == 0)
-	  {
-	    pt[0] = gde000;  pt[1] = gde010;  pt[2] = gde020;
-	    pt[3] = gde100;  pt[4] = gde110;  pt[5] = gde120;
-	    pt[6] = gde001;  pt[7] = gde011;  pt[8] = gde021;
-	    pt[9] = gde101;  pt[10] = gde111; pt[11] = gde121;
-	    pt[12] = gde002; pt[13] = gde012;
-	    pt[14] = gde102; pt[15] = gde112;
-	    pt[16] = ge00;   pt[17] = ge01;   pt[18] = ge02;
-	    pt[19] = ge10;   pt[20] = ge11;   pt[21] = ge12;
-	    pt[22] = scale;  pt[23] = ff;     pt[24] = d2;   pt[25] = alph;
-	  }
-      }
+      curve1_point_geometry(lnp0 + jp, inv, ptA);
+      if(haveB)
+	curve1_point_geometry(lnp0 + jp + 1, inv, ptB);
       __syncwarp();
 
-      double br = 0, tmp1 = 0, tmp2 = 0, tmp3 = 0, tmp4 = 0, tmp5 = 0;
-      double acc1 = 0, acc2 = 0;
+      double brA = 0, t1A = 0, t2A = 0, t3A = 0, t4A = 0, t5A = 0;
+      double brB = 0, t1B = 0, t2B = 0, t3B = 0, t4B = 0, t5B = 0;
+      double accA1 = 0, accA2 = 0, accB1 = 0, accB2 = 0;
 
 #pragma unroll 1
       for(int f0 = 0; f0 < nf; f0 += 32)
 	{
 	  int i = f0 + tid;
-	  double dbr = 0.0;
+	  double dbrA = 0.0, dbrB = 0.0;
 	  if(i < nf)
 	    {
 	      double n0 = CUDA_Nor[0][i], n1 = CUDA_Nor[1][i], n2 = CUDA_Nor[2][i];
-	      double lmu  = pt[16] * n0 + pt[17] * n1 + pt[18] * n2;
-	      double lmu0 = pt[19] * n0 + pt[20] * n1 + pt[21] * n2;
-	      if((lmu > TINY) && (lmu0 > TINY))
+	      double ar = __ldca(&areap[i]);
+	      double cl = inv[5], cls = inv[6];
+
+	      {
+		double lmu  = ptA[16] * n0 + ptA[17] * n1 + ptA[18] * n2;
+		double lmu0 = ptA[19] * n0 + ptA[20] * n1 + ptA[21] * n2;
+		if((lmu > TINY) && (lmu0 > TINY))
+		  {
+		    double dnom = lmu + lmu0;
+		    double dnom_1 = __drcp_rn(dnom);
+		    double s = lmu * lmu0 * (cl + cls * dnom_1);
+		    brA += ar * s;
+		    dbrA = ar * s;   /* == (Darea*s) * g : the g-fold */
+		    double lmu0_dnom = lmu0 * dnom_1;
+		    double lmu_dnom  = lmu * dnom_1;
+		    double dsmu  = cls * (lmu0_dnom * lmu0_dnom) + cl * lmu0;
+		    double dsmu0 = cls * (lmu_dnom * lmu_dnom) + cl * lmu;
+
+		    double sum1  = n0 * ptA[0] + n1 * ptA[1] + n2 * ptA[2];
+		    double sum10 = n0 * ptA[3] + n1 * ptA[4] + n2 * ptA[5];
+		    double sum2  = n0 * ptA[6] + n1 * ptA[7] + n2 * ptA[8];
+		    double sum20 = n0 * ptA[9] + n1 * ptA[10] + n2 * ptA[11];
+		    double sum3  = n0 * ptA[12] + n1 * ptA[13];
+		    double sum30 = n0 * ptA[14] + n1 * ptA[15];
+
+		    t1A += ar * (dsmu * sum1 + dsmu0 * sum10);
+		    t2A += ar * (dsmu * sum2 + dsmu0 * sum20);
+		    t3A += ar * (dsmu * sum3 + dsmu0 * sum30);
+		    t4A += ar * lmu * lmu0;
+		    t5A += ar * lmu * lmu0 * dnom_1;
+		  }
+	      }
+	      if(haveB)
 		{
-		  double cl = inv[5], cls = inv[6];
-		  double dnom = lmu + lmu0;
-		  double dnom_1 = __drcp_rn(dnom);
-		  double ar = __ldca(&areap[i]);
-		  double s = lmu * lmu0 * (cl + cls * dnom_1);
-		  br += ar * s;
-		  dbr = ar * s;   /* == (Darea*s) * g : the g-fold */
-		  double lmu0_dnom = lmu0 * dnom_1;
-		  double lmu_dnom  = lmu * dnom_1;
-		  double dsmu  = cls * (lmu0_dnom * lmu0_dnom) + cl * lmu0;
-		  double dsmu0 = cls * (lmu_dnom * lmu_dnom) + cl * lmu;
+		  double lmu  = ptB[16] * n0 + ptB[17] * n1 + ptB[18] * n2;
+		  double lmu0 = ptB[19] * n0 + ptB[20] * n1 + ptB[21] * n2;
+		  if((lmu > TINY) && (lmu0 > TINY))
+		    {
+		      double dnom = lmu + lmu0;
+		      double dnom_1 = __drcp_rn(dnom);
+		      double s = lmu * lmu0 * (cl + cls * dnom_1);
+		      brB += ar * s;
+		      dbrB = ar * s;
+		      double lmu0_dnom = lmu0 * dnom_1;
+		      double lmu_dnom  = lmu * dnom_1;
+		      double dsmu  = cls * (lmu0_dnom * lmu0_dnom) + cl * lmu0;
+		      double dsmu0 = cls * (lmu_dnom * lmu_dnom) + cl * lmu;
 
-		  double sum1  = n0 * pt[0] + n1 * pt[1] + n2 * pt[2];
-		  double sum10 = n0 * pt[3] + n1 * pt[4] + n2 * pt[5];
-		  double sum2  = n0 * pt[6] + n1 * pt[7] + n2 * pt[8];
-		  double sum20 = n0 * pt[9] + n1 * pt[10] + n2 * pt[11];
-		  double sum3  = n0 * pt[12] + n1 * pt[13];
-		  double sum30 = n0 * pt[14] + n1 * pt[15];
+		      double sum1  = n0 * ptB[0] + n1 * ptB[1] + n2 * ptB[2];
+		      double sum10 = n0 * ptB[3] + n1 * ptB[4] + n2 * ptB[5];
+		      double sum2  = n0 * ptB[6] + n1 * ptB[7] + n2 * ptB[8];
+		      double sum20 = n0 * ptB[9] + n1 * ptB[10] + n2 * ptB[11];
+		      double sum3  = n0 * ptB[12] + n1 * ptB[13];
+		      double sum30 = n0 * ptB[14] + n1 * ptB[15];
 
-		  tmp1 += ar * (dsmu * sum1 + dsmu0 * sum10);
-		  tmp2 += ar * (dsmu * sum2 + dsmu0 * sum20);
-		  tmp3 += ar * (dsmu * sum3 + dsmu0 * sum30);
-		  tmp4 += ar * lmu * lmu0;
-		  tmp5 += ar * lmu * lmu0 * dnom_1;
+		      t1B += ar * (dsmu * sum1 + dsmu0 * sum10);
+		      t2B += ar * (dsmu * sum2 + dsmu0 * sum20);
+		      t3B += ar * (dsmu * sum3 + dsmu0 * sum30);
+		      t4B += ar * lmu * lmu0;
+		      t5B += ar * lmu * lmu0 * dnom_1;
+		    }
 		}
 	    }
 
-	  /* ballot-compact this chunk's visible facets: the derivative sweep
-	     below becomes branch-free and its loads are independent, so they
-	     pipeline instead of serializing on the L1 scoreboard */
-	  unsigned vis = __ballot_sync(0xffffffff, dbr != 0.0);
+	  /* union-compact: one row load will serve both points */
+	  unsigned vis = __ballot_sync(0xffffffff, (dbrA != 0.0) || (dbrB != 0.0));
 	  int cnt = __popc(vis);
-	  if(dbr != 0.0)
+	  if((dbrA != 0.0) || (dbrB != 0.0))
 	    {
 	      int pos = __popc(vis & ((1u << tid) - 1u));
-	      wc[pos] = dbr;
+	      wcA[pos] = dbrA;
+	      wcB[pos] = dbrB;
 	      fc[pos] = f0 + tid;
 	    }
 	  __syncwarp();
@@ -2244,62 +2297,109 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 #pragma unroll 4
 	  for(int j = 0; j < cnt; j++)
 	    {
-	      double w = wc[j];
-	      double const * __restrict__ row = CUDA_DsphT[fc[j]];
-	      acc1 += w * row[c1];
+	      double wA = wcA[j];
+	      double wB = wcB[j];
+	      float const * __restrict__ row = CUDA_DsphTf[fc[j]];
+	      double v1 = (double)row[c1];
+	      accA1 += wA * v1;
+	      accB1 += wB * v1;
 	      if(c2 <= nshape)
-		acc2 += w * row[c2];
+		{
+		  double v2 = (double)row[c2];
+		  accA2 += wA * v2;
+		  accB2 += wB * v2;
+		}
 	    }
 	  __syncwarp();
 	}
 
-      /* butterfly-reduce the point sums so every lane has them */
+      /* butterfly-reduce both points' sums so every lane has them */
 #pragma unroll
       for(int off = 16; off > 0; off >>= 1)
 	{
-	  br   += __shfl_xor_sync(0xffffffff, br, off);
-	  tmp1 += __shfl_xor_sync(0xffffffff, tmp1, off);
-	  tmp2 += __shfl_xor_sync(0xffffffff, tmp2, off);
-	  tmp3 += __shfl_xor_sync(0xffffffff, tmp3, off);
-	  tmp4 += __shfl_xor_sync(0xffffffff, tmp4, off);
-	  tmp5 += __shfl_xor_sync(0xffffffff, tmp5, off);
+	  brA += __shfl_xor_sync(0xffffffff, brA, off);
+	  t1A += __shfl_xor_sync(0xffffffff, t1A, off);
+	  t2A += __shfl_xor_sync(0xffffffff, t2A, off);
+	  t3A += __shfl_xor_sync(0xffffffff, t3A, off);
+	  t4A += __shfl_xor_sync(0xffffffff, t4A, off);
+	  t5A += __shfl_xor_sync(0xffffffff, t5A, off);
+	  brB += __shfl_xor_sync(0xffffffff, brB, off);
+	  t1B += __shfl_xor_sync(0xffffffff, t1B, off);
+	  t2B += __shfl_xor_sync(0xffffffff, t2B, off);
+	  t3B += __shfl_xor_sync(0xffffffff, t3B, off);
+	  t4B += __shfl_xor_sync(0xffffffff, t4B, off);
+	  t5B += __shfl_xor_sync(0xffffffff, t5B, off);
 	}
 
-      /* one dytempT row per point, lanes = parameters (coalesced) */
-      double scale = pt[22], ff = pt[23], d2 = pt[24], alph = pt[25];
-      double cl = inv[5];
-      double ymod = br * scale;
-      double * __restrict__ row = dytemp + (size_t)jp * DYT_STRIDE;
+      /* point A: one dytempT row, lanes = parameters (coalesced) */
+      {
+	double scale = ptA[22], ff = ptA[23], d2 = ptA[24], alph = ptA[25];
+	double cl = inv[5];
+	double ymod = brA * scale;
+	double * __restrict__ row = dytemp + (size_t)jp * DYT_STRIDE;
 
-      double v1, v2;
-      /* group 1: columns 2..33 */
-      if(c1 <= nshape)            v1 = scale * acc1;
-      else if(c1 == nshape + 1)   v1 = scale * tmp1;
-      else if(c1 == nshape + 2)   v1 = scale * tmp2;
-      else if(c1 == nshape + 3)   v1 = scale * tmp3;
-      else if(c1 == nc + 1)       v1 = br * ff;
-      else if(c1 == nc + 2)       v1 = br * d2;
-      else if(c1 == nc + 3)       v1 = br * alph;
-      else if(c1 == ma - 1)       v1 = scale * tmp4 * cl;
-      else                        v1 = scale * tmp5; /* c1 == ma */
-      /* group 2: columns 34..65 */
-      if(c2 <= nshape)            v2 = scale * acc2;
-      else if(c2 == nshape + 1)   v2 = scale * tmp1;
-      else if(c2 == nshape + 2)   v2 = scale * tmp2;
-      else if(c2 == nshape + 3)   v2 = scale * tmp3;
-      else if(c2 == nc + 1)       v2 = br * ff;
-      else if(c2 == nc + 2)       v2 = br * d2;
-      else if(c2 == nc + 3)       v2 = br * alph;
-      else if(c2 == ma - 1)       v2 = scale * tmp4 * cl;
-      else                        v2 = scale * tmp5; /* c2 == ma */
+	double v1, v2;
+	if(c1 <= nshape)            v1 = scale * accA1;
+	else if(c1 == nshape + 1)   v1 = scale * t1A;
+	else if(c1 == nshape + 2)   v1 = scale * t2A;
+	else if(c1 == nshape + 3)   v1 = scale * t3A;
+	else if(c1 == nc + 1)       v1 = brA * ff;
+	else if(c1 == nc + 2)       v1 = brA * d2;
+	else if(c1 == nc + 3)       v1 = brA * alph;
+	else if(c1 == ma - 1)       v1 = scale * t4A * cl;
+	else                        v1 = scale * t5A; /* c1 == ma */
+	if(c2 <= nshape)            v2 = scale * accA2;
+	else if(c2 == nshape + 1)   v2 = scale * t1A;
+	else if(c2 == nshape + 2)   v2 = scale * t2A;
+	else if(c2 == nshape + 3)   v2 = scale * t3A;
+	else if(c2 == nc + 1)       v2 = brA * ff;
+	else if(c2 == nc + 2)       v2 = brA * d2;
+	else if(c2 == nc + 3)       v2 = brA * alph;
+	else if(c2 == ma - 1)       v2 = scale * t4A * cl;
+	else                        v2 = scale * t5A; /* c2 == ma */
 
-      if(c1 <= ma) { row[c1] = v1; dave1 += v1; }
-      if(c2 <= ma) { row[c2] = v2; dave2 += v2; }
-      if(tid == 0) ytemp[jp] = ymod;
-      lave += ymod;
+	if(c1 <= ma) { row[c1] = v1; dave1 += v1; }
+	if(c2 <= ma) { row[c2] = v2; dave2 += v2; }
+	if(tid == 0) ytemp[jp] = ymod;
+	lave += ymod;
+      }
 
-      /* pt[] is re-written by lane 0 at the top of the next iteration; make
-	 sure every lane is done reading it (Volta lanes run independently) */
+      /* point B */
+      if(haveB)
+	{
+	  double scale = ptB[22], ff = ptB[23], d2 = ptB[24], alph = ptB[25];
+	  double cl = inv[5];
+	  double ymod = brB * scale;
+	  double * __restrict__ row = dytemp + (size_t)(jp + 1) * DYT_STRIDE;
+
+	  double v1, v2;
+	  if(c1 <= nshape)            v1 = scale * accB1;
+	  else if(c1 == nshape + 1)   v1 = scale * t1B;
+	  else if(c1 == nshape + 2)   v1 = scale * t2B;
+	  else if(c1 == nshape + 3)   v1 = scale * t3B;
+	  else if(c1 == nc + 1)       v1 = brB * ff;
+	  else if(c1 == nc + 2)       v1 = brB * d2;
+	  else if(c1 == nc + 3)       v1 = brB * alph;
+	  else if(c1 == ma - 1)       v1 = scale * t4B * cl;
+	  else                        v1 = scale * t5B; /* c1 == ma */
+	  if(c2 <= nshape)            v2 = scale * accB2;
+	  else if(c2 == nshape + 1)   v2 = scale * t1B;
+	  else if(c2 == nshape + 2)   v2 = scale * t2B;
+	  else if(c2 == nshape + 3)   v2 = scale * t3B;
+	  else if(c2 == nc + 1)       v2 = brB * ff;
+	  else if(c2 == nc + 2)       v2 = brB * d2;
+	  else if(c2 == nc + 3)       v2 = brB * alph;
+	  else if(c2 == ma - 1)       v2 = scale * t4B * cl;
+	  else                        v2 = scale * t5B; /* c2 == ma */
+
+	  if(c1 <= ma) { row[c1] = v1; dave1 += v1; }
+	  if(c2 <= ma) { row[c2] = v2; dave2 += v2; }
+	  if(tid == 0) ytemp[jp + 1] = ymod;
+	  lave += ymod;
+	}
+
+      /* ptA/ptB are re-written at the top of the next pair; make sure every
+	 lane is done reading them (Volta lanes run independently) */
       __syncwarp();
     } /* jp */
 
@@ -4435,7 +4535,7 @@ CudaCalculateIter1Mrqcof2Curve2I1IA1(void)
 
 
 __global__ void
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4452,7 +4552,7 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 
 
 __global__ void 
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4470,7 +4570,7 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 
 
 __global__ void
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4486,7 +4586,7 @@ CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 
 
 __global__ void 
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I1IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4598,7 +4698,7 @@ CudaCalculateIter1Mrqcof2Start(void)
 
 
 __global__ void
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4616,7 +4716,7 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 
 
 __global__ void
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4634,7 +4734,7 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 
 
 __global__ void
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4652,7 +4752,7 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 /* MOST TIME CONSUMINNG KERNEL MRQCOF2CURVEM12I1IA0*/
 
 __global__ void 
-__launch_bounds__(128, 5)
+__launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
 {
   int bid = blockIdx();
