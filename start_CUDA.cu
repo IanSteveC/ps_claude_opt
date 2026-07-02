@@ -708,6 +708,14 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
   while(batch_freqs > 4 && (size_t)(batch_freqs * N_POLES + 33) * per_bid > budget)
     batch_freqs--;
 
+  // split the frequencies into equally sized batches (a 409+87 split wastes
+  // most of the GPU on the tail batch; 248+248 keeps both full)
+  if(n_max > batch_freqs)
+    {
+      int nbatches = (n_max + batch_freqs - 1) / batch_freqs;
+      batch_freqs = (n_max + nbatches - 1) / nbatches;
+    }
+
   CUDA_grid_dim = 128 * ((batch_freqs * N_POLES + 127) / 128);
   if(CUDA_grid_dim > N_BLOCKS)
     {
