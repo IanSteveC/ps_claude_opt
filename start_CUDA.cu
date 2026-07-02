@@ -63,6 +63,7 @@ void myinit(void)
 */
 
 int CUDA_grid_dim;
+int g_smCount = 80; /* set from deviceProp in CUDAPrepare */
 extern int Nfactor; // default 1, usage: --N number  where number is 2 - 16
 cudaStream_t stream1;
 cudaStream_t stream2;
@@ -204,6 +205,7 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   //auto smxBlock = cc.GetSmxBlock();
 
   CUDA_grid_dim = N_BLOCKS; //3072; //N_BLOCKS; //Nfactor * deviceProp.multiProcessorCount * smxBlock;
+  g_smCount = deviceProp.multiProcessorCount;
 
   if(!checkex)
     {
@@ -702,6 +704,10 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 
   int ma_est = n_coef + 5 + n_ph_par;
   int batch_freqs = N_BLOCKS / N_POLES;
+  int sm_cap_bids = 52 * g_smCount;
+  if(sm_cap_bids < 1024) sm_cap_bids = 1024;
+  if(batch_freqs > sm_cap_bids / N_POLES)
+    batch_freqs = sm_cap_bids / N_POLES;
   if(batch_freqs > n_max) batch_freqs = n_max;
 
   size_t freeB = 0, totB = 0;
@@ -1044,16 +1050,21 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	      //cudaStreamQuery(stream1);
 	      //usleep(1);
 	      
-	      if((loop & 15) == 15)
+	      if((loop & 3) == 3)
 		{
-		  double cp = fractionDone2 + (q / (double)n_max) * ((double)(*(volatile int *)theEnd) / (double)CUDA_grid_dim);
+		  double doneBids = (double)(*(volatile int *)theEnd) / (double)CUDA_grid_dim;
+		  double iterEst = (double)loop / 70.0;
+		  double inner = doneBids > iterEst ? doneBids : iterEst;
+		  if(inner > 0.999) inner = 0.999;
+		  double cp = fractionDone2 + (q / (double)n_max) * inner;
 		  cp = cp > 0.99990 ? 0.99990 : cp;
 		  fractionDone = cp;
 		  boinc_fraction_done(fractionDone);
-		  
-		  //printf("%9.6f \r", fractionDone); fflush(stdout);
 		}
-	      printf("."); fflush(stdout);
+	      printf("\r  freqs %d..%d of %d | iter %3d | converged %4d/%4d | %6.2f%%   ",
+		     n, n + batch_freqs - 1 > n_max ? n_max : n + batch_freqs - 1, n_max,
+		     loop + 1, *(volatile int *)theEnd, CUDA_grid_dim, fractionDone * 100.0);
+	      fflush(stdout);
 
 	      *theEnd = (*(volatile int *)theEnd >= CUDA_grid_dim);
 	      loop++;

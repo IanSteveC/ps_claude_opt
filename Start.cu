@@ -2011,9 +2011,10 @@ __global__ void CudaBuildDsphT(void)
   CUDA_DsphTf[f][c] = (float)v;
 }
 
-// per-point geometry for curve1: identical in every lane (inputs are uniform),
-// results parked in shared by lane 0 so nothing survives in registers.
-// layout of po[26]: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha
+// per-point geometry for curve1: called with a per-lane lnp so each lane
+// computes ONE point (one warp pass covers GEO_BATCH points), storing to its
+// own shared slot. layout of po[26]: 0..15 gde, 16..21 ge, 22 scale, 23 ff,
+// 24 d2, 25 alpha
 __device__ void __forceinline__ curve1_point_geometry(int lnp,
 						      double const * __restrict__ inv,
 						      double * __restrict__ po)
@@ -2099,18 +2100,15 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
   double gde010 = tmat31 * ee_1 + tmat32 * ee_2 + tmat33 * ee_3;
   double gde110 = tmat31 * ee0_1 + tmat32 * ee0_2 + tmat33 * ee0_3;
 
-  if(threadIdx.x == 0)
-    {
-      po[0] = gde000;  po[1] = gde010;  po[2] = gde020;
-      po[3] = gde100;  po[4] = gde110;  po[5] = gde120;
-      po[6] = gde001;  po[7] = gde011;  po[8] = gde021;
-      po[9] = gde101;  po[10] = gde111; po[11] = gde121;
-      po[12] = gde002; po[13] = gde012;
-      po[14] = gde102; po[15] = gde112;
-      po[16] = ge00;   po[17] = ge01;   po[18] = ge02;
-      po[19] = ge10;   po[20] = ge11;   po[21] = ge12;
-      po[22] = scale;  po[23] = ff;     po[24] = d2;   po[25] = alph;
-    }
+  po[0] = gde000;  po[1] = gde010;  po[2] = gde020;
+  po[3] = gde100;  po[4] = gde110;  po[5] = gde120;
+  po[6] = gde001;  po[7] = gde011;  po[8] = gde021;
+  po[9] = gde101;  po[10] = gde111; po[11] = gde121;
+  po[12] = gde002; po[13] = gde012;
+  po[14] = gde102; po[15] = gde112;
+  po[16] = ge00;   po[17] = ge01;   po[18] = ge02;
+  po[19] = ge10;   po[20] = ge11;   po[21] = ge12;
+  po[22] = scale;  po[23] = ff;     po[24] = d2;   po[25] = alph;
 }
 
 // warp-cooperative bright()+derivatives for one relative (Inrel==1) lightcurve:
@@ -2123,13 +2121,18 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
    the block's shared footprint is max(c1,c2), not the sum. */
 #define CURVE2_K 8
 
+#define GEO_BATCH 16
+
 struct c1share
 {
   double wcA[32];  /* compacted visible-facet weights, point A */
   double wcB[32];  /* compacted visible-facet weights, point B */
   int    fc[32];   /* compacted facet indices (union of A/B visibility) */
-  double ptA[26];  /* per-point geometry: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha */
-  double ptB[26];
+  /* geometry for GEO_BATCH points, one lane computes one point (the redundant
+     all-lanes-compute-one-point form costs 32x more FP64 pipe time, which is
+     ruinous on 1:64-FP64 parts like Jetson Orin).
+     layout per point: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha */
+  double geo[GEO_BATCH][26];
   double inv[11];  /* invariants: 0..4 phase model, 5 cl, 6 cls, 7..10 Blmat */
 };
 
@@ -2159,8 +2162,6 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   double * __restrict__ wcA = shw->wcA;
   double * __restrict__ wcB = shw->wcB;
   int    * __restrict__ fc = shw->fc;
-  double * __restrict__ ptA = shw->ptA;
-  double * __restrict__ ptB = shw->ptB;
   double * __restrict__ inv = shw->inv;
 
   int nc = CUDA_ncoef0;
@@ -2197,14 +2198,23 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   double * __restrict__ ytemp = CUDA_LCC->ytemp;
 
 #pragma unroll 1
-  for(int jp = 0; jp < Lpoints; jp += 2)
+  for(int jp0 = 0; jp0 < Lpoints; jp0 += GEO_BATCH)
     {
-      int haveB = (jp + 1 < Lpoints);
+      int nb = Lpoints - jp0;
+      if(nb > GEO_BATCH) nb = GEO_BATCH;
 
-      curve1_point_geometry(lnp0 + jp, inv, ptA);
-      if(haveB)
-	curve1_point_geometry(lnp0 + jp + 1, inv, ptB);
+      /* one lane = one point: the geometry (acos/sincos/exp2-heavy) runs once
+	 per point instead of once per lane per point */
+      if(tid < nb)
+	curve1_point_geometry(lnp0 + jp0 + tid, inv, shw->geo[tid]);
       __syncwarp();
+
+#pragma unroll 1
+  for(int jp = jp0; jp < jp0 + nb; jp += 2)
+    {
+      int haveB = (jp + 1 < jp0 + nb);
+      double const * __restrict__ ptA = shw->geo[jp - jp0];
+      double const * __restrict__ ptB = shw->geo[jp - jp0 + (haveB ? 1 : 0)];
 
       double brA = 0, t1A = 0, t2A = 0, t3A = 0, t4A = 0, t5A = 0;
       double brB = 0, t1B = 0, t2B = 0, t3B = 0, t4B = 0, t5B = 0;
@@ -2299,13 +2309,16 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	    {
 	      double wA = wcA[j];
 	      double wB = wcB[j];
-	      float const * __restrict__ row = CUDA_DsphTf[fc[j]];
-	      double v1 = (double)row[c1];
+	      /* FP64 table: on low-FP64-ratio GPUs (consumer/Jetson) the F32->F64
+		 convert an FP32 table would need costs a full DP-pipe slot per
+		 load - dearer than the bandwidth the float table saves */
+	      double const * __restrict__ row = CUDA_DsphT[fc[j]];
+	      double v1 = row[c1];
 	      accA1 += wA * v1;
 	      accB1 += wB * v1;
 	      if(c2 <= nshape)
 		{
-		  double v2 = (double)row[c2];
+		  double v2 = row[c2];
 		  accA2 += wA * v2;
 		  accB2 += wB * v2;
 		}
@@ -2398,10 +2411,11 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	  lave += ymod;
 	}
 
-      /* ptA/ptB are re-written at the top of the next pair; make sure every
-	 lane is done reading them (Volta lanes run independently) */
+      /* wc/fc are re-written next chunk pass and geo at the next batch; make
+	 sure every lane is done reading them (lanes run independently) */
       __syncwarp();
-    } /* jp */
+    } /* jp pair */
+    } /* jp0 geometry batch */
 
   if(c1 <= ma) dave[bid][c1 - 1] = dave1;
   if(c2 <= ma) dave[bid][c2 - 1] = dave2;
@@ -2598,10 +2612,13 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 #pragma unroll 1
       for(int l = 1; l <= rowEndIncl; l++, alphrow += mf1)
 	{
+	  /* lane p computes T[p][l]*s2w[p]; everyone gets all K via shuffle
+	     (integer pipe) instead of K uniform multiplies on the FP64 pipe */
+	  double wown = (tid < CURVE2_K) ? T[tid][l] * s2w[tid] : 0.0;
 	  double w[CURVE2_K];
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
-	    w[p] = T[p][l] * s2w[p];
+	    w[p] = __shfl_sync(0xffffffff, wown, p);
 
 	  int cend = colStrictLess ? (l - 1) : l;
 #pragma unroll 1
@@ -2614,14 +2631,16 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	      double * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
-	  if(tid == 0)
-	    {
-	      double b = 0.0;
+	  {
+	    /* products lane-parallel, summed in lane 0 in ascending p order */
+	    double bown = (tid < CURVE2_K) ? dws[tid] * T[tid][l] : 0.0;
+	    double b = 0.0;
 #pragma unroll
-	      for(int p = 0; p < CURVE2_K; p++)
-		b += dws[p] * T[p][l];
+	    for(int p = 0; p < CURVE2_K; p++)
+	      b += __shfl_sync(0xffffffff, bown, p);
+	    if(tid == 0)
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
-	    }
+	  }
 	}
 
       /* ---- tail rows with ia[] gating (only when lastone < lastma; ---- */
