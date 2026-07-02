@@ -50,7 +50,9 @@ __device__ __device_builtin__ double __hiloint2double(int hi, int lo);
 #include "constants.h"
 //NOTE: https://devtalk.nvidia.com/default/topic/517801/-34-texture-is-not-a-template-34-error-mvs-2010/
 
-#define N_BLOCKS 2048
+// One block ("bid") = one (frequency, pole) pair since the pole merge;
+// must hold one full batch: (freqs per batch) * N_POLES, rounded up to 128.
+#define N_BLOCKS 4096
 
 
 //global to all freq

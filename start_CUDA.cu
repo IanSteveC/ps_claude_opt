@@ -215,15 +215,15 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   cudaError_t res;
 
   //Global parameters
-  //res = cudaMemcpyToSymbol(CUDA_beta_pole, beta_pole, sizeof(double) * (N_POLES + 1));
-  //res = cudaMemcpyToSymbol(CUDA_lambda_pole, lambda_pole, sizeof(double) * (N_POLES + 1));
-  
+  res = cudaMemcpyToSymbol(CUDA_beta_pole, beta_pole, sizeof(double) * (N_POLES + 1));
+  res = cudaMemcpyToSymbol(CUDA_lambda_pole, lambda_pole, sizeof(double) * (N_POLES + 1));
+
   for(int y = 1; y <= N_POLES; y++)
     {
       g_beta[y] = beta_pole[y];
       g_lambda[y] = lambda_pole[y];
     }
-  
+
   
   res = cudaMemcpyToSymbol(CUDA_par, par, sizeof(double) * 4);
   cl = log(cl);
@@ -422,58 +422,62 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
   cudaMemcpyToSymbolAsync(CUDA_ncoef0, &n0, sizeof(n0), 0, cudaMemcpyHostToDevice, stream3);
   printf("ma = %d, CUDA_Ncoef = %d, CUDA_ncoef0 = %d, mfit = %d, m = %d, lastma = %d, lastone = %d\n", ma, n_coef, n0, lmfit, m, llastma, llastone);
 
-  int CUDA_Grid_dim_precalc = CUDA_grid_dim;
-  if(max_test_periods < CUDA_Grid_dim_precalc)
-    {
-      CUDA_Grid_dim_precalc = max_test_periods;
-      //#ifdef _DEBUG
-      //		fprintf(stderr, "CUDA_Grid_dim_precalc = %d\n", CUDA_Grid_dim_precalc);
-      //#endif
-    }
+  // Pole-merged: one bid per (test period, pole) pair, all N_POLES computed concurrently.
+  int CUDA_Grid_dim_precalc = 128 * ((max_test_periods * N_POLES + 127) / 128);
+  if(CUDA_Grid_dim_precalc > N_BLOCKS)
+    CUDA_Grid_dim_precalc = N_BLOCKS; // batching below handles the rest
+
+  int batch_periods = CUDA_Grid_dim_precalc / N_POLES;
+
+  // dytemp/ytemp are per-curve scratch: size them by the longest curve, not ndata
+  int max_lp = 4;
+  for(int c = 1; c <= l_curves; c++)
+    if(l_points[c] > max_lp) max_lp = l_points[c];
 
   err = cudaMalloc(&pcc, (CUDA_Grid_dim_precalc + 32) * sizeof(freq_context));
   cudaMemcpyToSymbolAsync(CUDA_CC, &pcc, sizeof(pcc), 0, cudaMemcpyHostToDevice, stream3);
-  
+
   m = (Numfac + 1) * (n_coef + 1);
   cudaMemcpyToSymbolAsync(CUDA_Dg_block, &m, sizeof(m), 0, cudaMemcpyHostToDevice, stream3);
 
   //  double *pa,
   double *pg, /* *pal, */ *pco, *pdytemp, *pytemp;
 
-  err = cudaMalloc(&pg, CUDA_Grid_dim_precalc * (Numfac + 1) * (n_coef + 1) * sizeof(double));
+  err = cudaMalloc(&pg, (size_t)CUDA_Grid_dim_precalc * (Numfac + 1) * (n_coef + 1) * sizeof(double));
   err = cudaMemcpyToSymbolAsync(CUDA_Dg, &pg, sizeof(pg), 0, cudaMemcpyHostToDevice, stream3);
-  err = cudaMalloc(&pco, (CUDA_Grid_dim_precalc) * (lmfit + 1) * (lmfit + 2) * sizeof(double));
-  err = cudaMalloc(&pdytemp, (CUDA_Grid_dim_precalc + 1) * (ndata + 1) * (ma + 1) * sizeof(double));
-  err = cudaMalloc(&pytemp, CUDA_Grid_dim_precalc * (ndata + 1) * sizeof(double));
+  err = cudaMalloc(&pco, (size_t)(CUDA_Grid_dim_precalc) * (lmfit + 1) * (lmfit + 2) * sizeof(double));
+  err = cudaMalloc(&pdytemp, (size_t)(CUDA_Grid_dim_precalc + 1) * (max_lp + 1) * (ma + 1) * sizeof(double));
+  err = cudaMalloc(&pytemp, (size_t)CUDA_Grid_dim_precalc * (max_lp + 1) * sizeof(double));
 
-  dim3 dim_3(32, CUDA_Grid_dim_precalc, 1);
-  
   for(m = 0; m < CUDA_Grid_dim_precalc; m++)
     {
       freq_context ps;
-      ps.Dg = &pg[m * (Numfac + 1) * (n_coef + 1)];
-      ps.covar = &pco[m * (lmfit + 1) * (lmfit + 1)];
-      ps.dytemp = &pdytemp[m * (ndata + 1) * (ma + 1)];
-      ps.ytemp = &pytemp[m * (ndata + 1)];
+      ps.Dg = &pg[(size_t)m * (Numfac + 1) * (n_coef + 1)];
+      ps.covar = &pco[(size_t)m * (lmfit + 1) * (lmfit + 1)];
+      ps.dytemp = &pdytemp[(size_t)m * (max_lp + 1) * (ma + 1)];
+      ps.ytemp = &pytemp[(size_t)m * (max_lp + 1)];
       freq_context *pt = &((freq_context*)pcc)[m];
       err = cudaMemcpyAsync(pt, &ps, sizeof(void*) * 4, cudaMemcpyHostToDevice, stream3);
     }
-  
+
   //cudaStreamSynchronize(stream3);
-  
+
+  int pdim1 = CUDA_Grid_dim_precalc / 32;
+  dim3 pblock4(CUDA_BLOCK_DIM, BLOCKX4, 1);
+  int pdim4 = CUDA_Grid_dim_precalc / BLOCKX4;
+
   printf("MaxTestPeriods %d %d\n", max_test_periods, CUDA_Grid_dim_precalc);
 
-  for(n = 1; n <= max_test_periods; n += CUDA_Grid_dim_precalc)
+  for(n = 1; n <= max_test_periods; n += batch_periods)
     {
-      CudaCalculatePrepare<<<1, CUDA_Grid_dim_precalc, 0, stream3>>>(n, max_test_periods);
-      
-      for(m = 1; m <= N_POLES; m++)
+      CudaCalculatePrepare<<<pdim1, 32, 0, stream3>>>(n, max_test_periods);
+
+      // all poles for this batch of test periods run concurrently as separate bids
 	{
 	  //zero global End signal
 	  *theEnd = 0;
 	  cudaMemcpyToSymbolAsync(CUDA_End, theEnd, sizeof(int), 0, cudaMemcpyHostToDevice, stream3);
-	  //CudaCalculatePreparePole<<<1, CUDA_Grid_dim_precalc, 0, stream3>>>(m, freq_start, freq_step, n); 
-	  CudaCalculatePreparePole<<<1, CUDA_Grid_dim_precalc, 0, stream3>>>(freq_start, freq_step, n, g_beta[m], g_lambda[m]); 
+	  CudaCalculatePreparePole<<<pdim1, 32, 0, stream3>>>(freq_start, freq_step, n);
 
 	  //#ifdef _DEBUG
 	  //printf("ia[1] = %d\r\n", ia[1]);
@@ -484,7 +488,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	  while(!*(volatile int *)theEnd)
 	    {
 	      loop++;
-	      CudaCalculateIter1Begin<<<1, CUDA_Grid_dim_precalc, 0, stream3>>>(CUDA_Grid_dim_precalc);
+	      CudaCalculateIter1Begin<<<pdim1, 32, 0, stream3>>>(CUDA_Grid_dim_precalc);
 	      cudaStreamQuery(stream3);
 	      
 	      cudaEventRecord(event1, stream3);
@@ -499,7 +503,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	      //cudaStreamQuery(stream3);
 
 	      //1, dim_3 works
-	      CudaCalculateIter1Mrqcof1Start<<<1, dim_3, 0, stream3>>>();
+	      CudaCalculateIter1Mrqcof1Start<<<pdim4, pblock4, 0, stream3>>>();
 
 	      cudaStreamQuery(stream3);
 	      
@@ -531,7 +535,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  if(ia[1])
 		    CudaCalculateIter1Mrqcof1Curve2I1IA1<<<CUDA_Grid_dim_precalc, CUDA_BLOCK_DIM, 0, stream3>>>();
 		  else // 1, dim_3 ???? works
-		    CudaCalculateIter1Mrqcof1Curve2I1IA0<<<1, dim_3, 0, stream3>>>();		    
+		    CudaCalculateIter1Mrqcof1Curve2I1IA0<<<pdim4, pblock4, 0, stream3>>>();		    
 		}
 	      else
 		{ // 1, dim_3 This can not be changed!!!!
@@ -547,7 +551,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 
 	      cudaStreamQuery(stream3);
 	      
-	      CudaCalculateIter1Mrqcof1End<<<1, dim_3, 0, stream3>>>();
+	      CudaCalculateIter1Mrqcof1End<<<pdim4, pblock4, 0, stream3>>>();
 
 	      cudaStreamQuery(stream3);
 	      
@@ -556,7 +560,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	      cudaStreamQuery(stream3);
 	      
 	      // 1, dim_3 OK
-	      CudaCalculateIter1Mrqcof2Start<<<1, dim_3, 0, stream3>>>();
+	      CudaCalculateIter1Mrqcof2Start<<<pdim4, pblock4, 0, stream3>>>();
 	      
 	      cudaStreamQuery(stream3);
 	      
@@ -582,13 +586,13 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 
 	      if(in_rel[l_curves])
 		{ // 1, dim_3 OK
-		  CudaCalculateIter1Mrqcof2Curve1LastI1<<<1, dim_3, 0, stream3>>>();
+		  CudaCalculateIter1Mrqcof2Curve1LastI1<<<pdim4, pblock4, 0, stream3>>>();
 		  cudaStreamQuery(stream3);
 	      
 		  if(ia[1])
 		    CudaCalculateIter1Mrqcof2Curve2I1IA1<<<CUDA_Grid_dim_precalc, CUDA_BLOCK_DIM, 0, stream3>>>();
 		  else //1, dim_3, ok
-		    CudaCalculateIter1Mrqcof2Curve2I1IA0<<<1, dim_3, 0, stream3>>>();
+		    CudaCalculateIter1Mrqcof2Curve2I1IA0<<<pdim4, pblock4, 0, stream3>>>();
 		}
 	      else
 		{ //1, dim_3 no no no
@@ -596,18 +600,18 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  cudaStreamQuery(stream3);
 	      
 		  if(ia[1]) //ok
-		    CudaCalculateIter1Mrqcof2Curve2I0IA1<<<1, dim_3, 0, stream3>>>();
+		    CudaCalculateIter1Mrqcof2Curve2I0IA1<<<pdim4, pblock4, 0, stream3>>>();
 		  else //1, dim_3 no no no
 		    CudaCalculateIter1Mrqcof2Curve2I0IA0<<<CUDA_Grid_dim_precalc, CUDA_BLOCK_DIM, 0, stream3>>>();
 		}
 
 	      cudaStreamQuery(stream3);
 	      
-	      CudaCalculateIter1Mrqcof2End<<<1, dim_3, 0, stream3>>>();
+	      CudaCalculateIter1Mrqcof2End<<<pdim4, pblock4, 0, stream3>>>();
 
 	      cudaStreamQuery(stream3);
 	      
-	      CudaCalculateIter1Mrqmin2End<<<1, dim_3, 0, stream3>>>();
+	      CudaCalculateIter1Mrqmin2End<<<pdim4, pblock4, 0, stream3>>>();
 	      
 	      cudaStreamQuery(stream3);
 	      
@@ -616,7 +620,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  cudaStreamSynchronize(stream3);
 		}
 	      
-	      CudaCalculateIter2<<<1, dim_3, 0, stream3>>>();
+	      CudaCalculateIter2<<<pdim4, pblock4, 0, stream3>>>();
 	      cudaStreamQuery(stream3);
 
 	      *theEnd = (*(volatile int *)theEnd >= CUDA_Grid_dim_precalc);
@@ -633,11 +637,19 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	}
 
       cudaStreamSynchronize(stream3);
-      
-      for(m = 1; m <= CUDA_Grid_dim_precalc; m++)
+
+      // best pole per test period (earliest pole with minimal dev wins, as before)
+      for(m = 0; m < batch_periods && (n + m) <= max_test_periods; m++)
 	{
-	  if(isReported[m-1] == 1)
-	    sum_dark_facet = sum_dark_facet + dark_best[m-1];
+	  int best = -1;
+	  for(int p = 0; p < N_POLES; p++)
+	    {
+	      int b = m * N_POLES + p;
+	      if(isReported[b] == 1 && (best < 0 || dev_best[b] < dev_best[best]))
+		best = b;
+	    }
+	  if(best >= 0)
+	    sum_dark_facet = sum_dark_facet + dark_best[best];
 	}
     } /* period loop */
 
@@ -670,9 +682,34 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 
   setpriority(PRIO_PROCESS, 0, 20);
 
-  if(n_max < CUDA_grid_dim)
-    CUDA_grid_dim = 32 * ((n_max + 31) / 32);
-  fprintf(stderr, "Cuda grid dim %d, N_BLOCKS %d\n", CUDA_grid_dim, N_BLOCKS);  
+  // Pole-merged batching: one bid per (frequency, pole) pair. Size the batch by
+  // frequencies (each brings N_POLES bids) and cap by free GPU memory.
+  int max_lp = 4;
+  for(int c = 1; c <= l_curves; c++)
+    if(l_points[c] > max_lp) max_lp = l_points[c];
+
+  int ma_est = n_coef + 5 + n_ph_par;
+  int batch_freqs = N_BLOCKS / N_POLES;
+  if(batch_freqs > n_max) batch_freqs = n_max;
+
+  size_t freeB = 0, totB = 0;
+  cudaMemGetInfo(&freeB, &totB);
+  size_t per_bid = ((size_t)(max_lp + 1) * (ma_est + 1) + (max_lp + 1)
+		    + (size_t)(ma_est + 1) * (ma_est + 2)
+		    + (size_t)(Numfac + 1) * (n_coef + 1)) * sizeof(double) + sizeof(freq_context);
+  size_t reserve = 96u * 1024 * 1024;
+  size_t budget = (freeB > reserve) ? (size_t)((double)(freeB - reserve) * 0.9) : 0;
+  while(batch_freqs > 4 && (size_t)(batch_freqs * N_POLES + 33) * per_bid > budget)
+    batch_freqs--;
+
+  CUDA_grid_dim = 128 * ((batch_freqs * N_POLES + 127) / 128);
+  if(CUDA_grid_dim > N_BLOCKS)
+    {
+      CUDA_grid_dim = N_BLOCKS;
+      batch_freqs = N_BLOCKS / N_POLES;
+    }
+  fprintf(stderr, "Cuda grid dim %d (%d freqs x %d poles per batch), N_BLOCKS %d, free mem %zuMB\n",
+	  CUDA_grid_dim, batch_freqs, N_POLES, N_BLOCKS, freeB / 1048576);
   int n_iter_max, LinesWritten;
   double iter_diff_max;
   //freq_result *res;
@@ -760,20 +797,21 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 
   double *pg, *pco, *pdytemp, *pytemp;
 
-  err = cudaMalloc(&pg, CUDA_grid_dim * (Numfac + 1) * (n_coef + 1) * sizeof(double));
+  err = cudaMalloc(&pg, (size_t)CUDA_grid_dim * (Numfac + 1) * (n_coef + 1) * sizeof(double));
   err = cudaMemcpyToSymbolAsync(CUDA_Dg, &pg, sizeof(pg), 0, cudaMemcpyHostToDevice, stream1);
 
-  err = cudaMalloc(&pco, CUDA_grid_dim * (lmfit + 1) * (lmfit + 1) * sizeof(double));
-  err = cudaMalloc(&pdytemp, (CUDA_grid_dim + 1) * (ndata + 1) * (ma + 1) * sizeof(double));
-  err = cudaMalloc(&pytemp, CUDA_grid_dim * (ndata + 1) * sizeof(double));
+  err = cudaMalloc(&pco, (size_t)CUDA_grid_dim * (lmfit + 1) * (lmfit + 1) * sizeof(double));
+  // dytemp/ytemp are per-curve scratch, sized by the longest curve rather than ndata
+  err = cudaMalloc(&pdytemp, (size_t)(CUDA_grid_dim + 1) * (max_lp + 1) * (ma + 1) * sizeof(double));
+  err = cudaMalloc(&pytemp, (size_t)CUDA_grid_dim * (max_lp + 1) * sizeof(double));
 
   for(m = 0; m < CUDA_grid_dim; m++)
     {
       freq_context ps;
-      ps.Dg      = &pg[m * (Numfac + 1) * (n_coef + 1)];
-      ps.covar   = &pco[m * (lmfit + 1) * (lmfit + 1)];
-      ps.dytemp  = &pdytemp[m * (ndata + 1) * (ma + 1)];
-      ps.ytemp   = &pytemp[m * (ndata + 1)];
+      ps.Dg      = &pg[(size_t)m * (Numfac + 1) * (n_coef + 1)];
+      ps.covar   = &pco[(size_t)m * (lmfit + 1) * (lmfit + 1)];
+      ps.dytemp  = &pdytemp[(size_t)m * (max_lp + 1) * (ma + 1)];
+      ps.ytemp   = &pytemp[(size_t)m * (max_lp + 1)];
       freq_context *pt = &((freq_context*)pcc)[m];
       err = cudaMemcpyAsync(pt, &ps, sizeof(void*) * 4, cudaMemcpyHostToDevice, stream1);
       //usleep(1);
@@ -808,35 +846,24 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
       double fractionDone = (double)n / (double)n_max;
 
       CudaCalculatePrepare<<<dim1, dim2, 0, stream1>>>(n, n_max);
-        
-      for(m = 1; m <= N_POLES; m++)
+
+      // all poles for this batch of frequencies run concurrently as separate bids
 	{
 	  //cudaStreamQuery(stream1);
 	  usleep(1);
-	  
+
 	  //sched_yield(); //usleep(1);
-	  double q = n_max - n; q = q > CUDA_grid_dim ? CUDA_grid_dim : q;
-	  double fractionDone2 = (double)(n-1)/(double)n_max + q/(double)n_max * (double)(m-1)/(double)N_POLES;
+	  double q = n_max - n + 1; q = q > batch_freqs ? batch_freqs : q;
+	  double fractionDone2 = (double)(n-1)/(double)n_max;
 	  fractionDone = fractionDone2 > 0.99990 ? 0.99990 : fractionDone2;
-	  printf("\r                            %d %d %d %9.6f \r", n, N_POLES, m, fractionDone); fflush(stdout);
+	  printf("\r                            %d %9.6f \r", n, fractionDone); fflush(stdout);
 	  fflush(stdout);
 	  boinc_fraction_done(fractionDone);
-	  
-#ifdef _DEBUG
-	  float fraction2 = fractionDone2 * 100;
-	  //float fraction = fractionDone * 100;
-	  std::time_t t = std::time(nullptr);   // get time now
-	  std::tm* now = std::localtime(&t);
 
-	  printf("%02d:%02d:%02d | Fraction done: %.4f%%\n", now->tm_hour, now->tm_min, now->tm_sec, fraction2);
-	  fprintf(stderr, "%02d:%02d:%02d | Fraction done: %.4f%%\n", now->tm_hour, now->tm_min, now->tm_sec, fraction2);
-#endif
-	  
 	  //zero global End signal
 	  *theEnd = 0;
 	  cudaMemcpyToSymbolAsync(CUDA_End, theEnd, sizeof(int), 0, cudaMemcpyHostToDevice, stream1);
-	  //CudaCalculatePreparePole<<<dim1, dim2, 0, stream1>>>(m, freq_start, freq_step, n);
-	  CudaCalculatePreparePole<<<dim1, dim2, 0, stream1>>>(freq_start, freq_step, n, g_beta[m], g_lambda[m]); 
+	  CudaCalculatePreparePole<<<dim1, dim2, 0, stream1>>>(freq_start, freq_step, n);
 
 	  //cudaStreamQuery(stream1);
 	  usleep(1);
@@ -983,7 +1010,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	      
 	      if((loop & 15) == 15)
 		{
-		  double cp = fractionDone2 + ((double)loop / (double)64.0 * (double)q/(double)(n_max * N_POLES));
+		  double cp = fractionDone2 + (q / (double)n_max) * ((double)(*(volatile int *)theEnd) / (double)CUDA_grid_dim);
 		  cp = cp > 0.99990 ? 0.99990 : cp;
 		  fractionDone = cp;
 		  boinc_fraction_done(fractionDone);
@@ -1019,24 +1046,33 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 
       LinesWritten = 0;
 
-      for(m = 0; m < CUDA_grid_dim; m++)
+      // one output line per frequency: best pole wins (earliest pole with minimal
+      // dev, matching the original serial-pole update rule)
+      for(m = 0; m < batch_freqs && (n + m) <= n_max; m++)
 	{
-	  if(isReported[m] == 1)
+	  int best = -1;
+	  for(int p = 0; p < N_POLES; p++)
+	    {
+	      int b = m * N_POLES + p;
+	      if(isReported[b] == 1 && (best < 0 || dev_best[b] < dev_best[best]))
+		best = b;
+	    }
+	  if(best >= 0)
 	    {
 	      LinesWritten++;
 	      /* output file */
 	      if(n == 1 && m == 0)
-		{ 
-		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * per_best[m], dev_best[m], dev_best[m] * dev_best[m] * (ndata - 3), conw_r * escl * escl, round(la_best[m]), round(be_best[m]));
+		{
+		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * per_best[best], dev_best[best], dev_best[best] * dev_best[best] * (ndata - 3), conw_r * escl * escl, round(la_best[best]), round(be_best[best]));
 		}
 	      else
 		{
-		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * per_best[m], dev_best[m], dev_best[m] * dev_best[m] * (ndata - 3), dark_best[m], round(la_best[m]), round(be_best[m]));
+		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * per_best[best], dev_best[best], dev_best[best] * dev_best[best] * (ndata - 3), dark_best[best], round(la_best[best]), round(be_best[best]));
 		}
 	    }
 	}
-      
-      n += CUDA_grid_dim;
+
+      n += batch_freqs;
     } /* period loop */
 	
   boinc_fraction_done(0.99992);

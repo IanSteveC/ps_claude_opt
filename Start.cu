@@ -3358,8 +3358,8 @@ __device__ void __forceinline__ MrqcofCurve23I0IA1(freq_context * __restrict__ C
 __global__ void CudaCalculatePrepare(int n_start, int n_max)
 {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  int n = n_start + tid;
-  
+  int n = n_start + tid / N_POLES; // bid = (freq, pole) pair, pole-major within freq
+
   if(n > n_max)
     {
       setFlag(isInvalid, tid);
@@ -3378,14 +3378,15 @@ __global__ void CudaCalculatePrepare(int n_start, int n_max)
 }
 
 
-__global__ void 
+__global__ void
 __launch_bounds__(1024,1)
-  CudaCalculatePreparePole(double freq_start, double freq_step, int n_start, double beta, double lambda)
+  CudaCalculatePreparePole(double freq_start, double freq_step, int n_start)
 {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  n_start += tid;
+  n_start += tid / N_POLES;
+  int m = tid % N_POLES + 1; // pole index, 1-based as in CUDA_beta_pole/CUDA_lambda_pole
 
-  if(isAnyTrue(isInvalid, tid)) 
+  if(isAnyTrue(isInvalid, tid))
     {
       atomicAdd(&CUDA_End, 1);
       isReported[tid] = 0; //signal not to read result
@@ -3393,6 +3394,8 @@ __launch_bounds__(1024,1)
       return;
     }
 
+  double beta = CUDA_beta_pole[m];
+  double lambda = CUDA_lambda_pole[m];
   double period = __drcp_rn(freq_start - (n_start - 1) * freq_step);
   double * __restrict__ cgp = cgg[tid] + 1; 
   double const * __restrict__ cfp = CUDA_cg_first; // + 1;
