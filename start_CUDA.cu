@@ -446,6 +446,9 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
       fprintf(stderr, "Error: ma = %d exceeds the supported maximum of %d parameters\n", ma, DYT_STRIDE - 1);
       exit(3);
     }
+  int gauss_st = (lmfit + 1) | 1;
+  size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(double);
+
 
   //  double *pa,
   double *pco, *pdytemp, *pytemp;
@@ -560,7 +563,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 
 	      cudaStreamQuery(stream3);
 	      
-	      CudaCalculateIter1Mrqmin1End<<<CUDA_Grid_dim_precalc, CUDA_BLOCK_DIM, 0, stream3>>>();
+	      CudaCalculateIter1Mrqmin1End<<<CUDA_Grid_dim_precalc, 128, gauss_shb, stream3>>>();
 
 	      cudaStreamQuery(stream3);
 	      
@@ -804,6 +807,9 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
       fprintf(stderr, "Error: ma = %d exceeds the supported maximum of %d parameters\n", ma, DYT_STRIDE - 1);
       exit(3);
     }
+  int gauss_st = (lmfit + 1) | 1;
+  size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(double);
+
 
   double *pco, *pdytemp, *pytemp;
 
@@ -948,7 +954,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	      //cudaStreamQuery(stream1);
 	      usleep(1); // allow higher priority threads (stage 1) run
 
-	      CudaCalculateIter1Mrqmin1End<<<CUDA_grid_dim/1, CUDA_BLOCK_DIM, 0, stream1>>>(); // 1 max?, gauss, shared
+	      CudaCalculateIter1Mrqmin1End<<<CUDA_grid_dim, 128, gauss_shb, stream1>>>(); // one block per bid, matrix in shared
 	      
 	      //cudaStreamQuery(stream1);
 	      usleep(1); 

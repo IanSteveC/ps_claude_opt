@@ -2047,6 +2047,7 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   double const * __restrict__ areap = &(Areag[bid][0]);
   double * __restrict__ dytemp = CUDA_LCC->dytemp;
   double * __restrict__ ytemp = CUDA_LCC->ytemp;
+  bool fewBlocks = (gridDim.x * blockDim.y) <= 512;
 
 #pragma unroll 1
   for(int jp = 0; jp < Lpoints; jp++)
@@ -2192,12 +2193,30 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	  /* derivative sweep for this facet chunk: lanes = parameters */
 	  int kend = nf - f0;
 	  if(kend > 32) kend = 32;
-#pragma unroll 4
-	  for(int k = 0; k < kend; k++)
+	  if(!fewBlocks)
 	    {
-	      double w = dbrw[k];
-	      if(w != 0.0)
+	      /* skip invisible facets: saves L1 bandwidth when the GPU is full */
+#pragma unroll 4
+	      for(int k = 0; k < kend; k++)
 		{
+		  double w = dbrw[k];
+		  if(w != 0.0)
+		    {
+		      double const * __restrict__ row = CUDA_DsphT[f0 + k];
+		      acc1 += w * row[c1];
+		      if(c2 <= nshape)
+			acc2 += w * row[c2];
+		    }
+		}
+	    }
+	  else
+	    {
+	      /* tiny grids (precalc) are latency-bound: the branch-free stream
+		 pipelines the loads; w == 0 terms add exactly zero */
+#pragma unroll 8
+	      for(int k = 0; k < kend; k++)
+		{
+		  double w = dbrw[k];
 		  double const * __restrict__ row = CUDA_DsphT[f0 + k];
 		  acc1 += w * row[c1];
 		  if(c2 <= nshape)
@@ -2536,6 +2555,199 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
       trial_chisqg[bid] = ltrial;
     }
   __syncwarp();
+}
+
+// mrqmin step 1 (damped normal matrix -> Gauss-Jordan solve), one 128-thread
+// block per bid with the matrix in dynamic shared memory. The original ran one
+// warp per bid on the matrix in global memory: ~50 full read+write sweeps of a
+// 24KB matrix per solve, DRAM-bound. The inverted matrix itself is discarded
+// by the caller (mrqcof2 rezeroes covar), so it is never written back and the
+// final column-unscramble pass of gauss_errc is skipped; only da and atry
+// leave the block. Pivot selection order matches the original except for exact
+// |value| ties across the different scan partitioning.
+__device__ void __forceinline__ mrqmin_1_end_opt(freq_context * __restrict__ CUDA_LCC, int bid)
+{
+  int ma = CUDA_ma, mf = CUDA_mfit;
+  int mf1 = mf + 1;
+  int tid = threadIdx.x;
+  int stride = mf1 | 1;
+
+  extern __shared__ double sh[];
+  double * __restrict__ cov = sh;                        /* [mf1][stride], row 0 unused */
+  double * __restrict__ das = sh + (size_t)mf1 * stride; /* [mf1+1] */
+
+  __shared__ double sh_big[128];
+  __shared__ int16_t sh_irow[128], sh_icol[128];
+  __shared__ int16_t ipiv[N80];
+  __shared__ double pivinv_s;
+  __shared__ int icol_s, irow_s, err_s;
+
+  if(isAnyTrue(isAlambda, bid))
+    {
+      for(int n = 1 + tid; n <= ma; n += 128)
+	atry[bid][n] = cgg[bid][n];
+    }
+
+  double ccc = 1 + __ldg(&Alamda[bid]);
+
+  /* stage the damped normal matrix (covar never goes to global memory) */
+  for(int x = mf1 + 1 + tid; x < mf1 * mf1; x += 128)
+    {
+      int j = x / mf1, k = x - j * mf1;
+      if(k == 0) continue; /* column 0 is never read */
+      double v = __ldca(&alphag[bid][x - 1]);
+      if(j == k) v *= ccc;
+      cov[j * stride + k] = v;
+    }
+  for(int x = 1 + tid; x <= mf; x += 128)
+    {
+      das[x] = betag[bid][x - 1];
+      ipiv[x] = 0;
+    }
+  if(tid == 0) err_s = 0;
+  __syncthreads();
+
+  for(int i = 1; i <= mf; i++)
+    {
+      /* full-pivot search: thread j scans row j */
+      double big = 0.0;
+      int irow = 0, licol = 0;
+      int j = 1 + tid;
+      if(j <= mf && ipiv[j] != 1)
+	{
+	  double const * __restrict__ rowp = cov + j * stride;
+#pragma unroll 4
+	  for(int k = 1; k <= mf; k++)
+	    {
+	      int ii = ipiv[k];
+	      if(ii == 0)
+		{
+		  double t = fabs(rowp[k]);
+		  if(t >= big)
+		    {
+		      big = t;
+		      irow = j;
+		      licol = k;
+		    }
+		}
+	      else if(ii > 1)
+		err_s = 1; /* all writers store the same value */
+	    }
+	}
+      sh_big[tid] = big;
+      sh_irow[tid] = irow;
+      sh_icol[tid] = licol;
+      __syncthreads();
+
+      if(err_s)
+	break;
+
+      if(tid == 0)
+	{
+	  double b = sh_big[0];
+	  int ir = sh_irow[0], ic = sh_icol[0];
+	  for(int t = 1; t < 128; t++)
+	    if(sh_big[t] >= b)
+	      {
+		b = sh_big[t];
+		ir = sh_irow[t];
+		ic = sh_icol[t];
+	      }
+	  ipiv[ic] += 1;
+	  icol_s = ic;
+	  irow_s = ir;
+	}
+      __syncthreads();
+
+      int icol = icol_s;
+      int irowg = irow_s;
+
+      if(irowg != icol)
+	{
+	  for(int l = 1 + tid; l <= mf; l += 128)
+	    {
+	      double t = cov[irowg * stride + l];
+	      cov[irowg * stride + l] = cov[icol * stride + l];
+	      cov[icol * stride + l] = t;
+	    }
+	  if(tid == 0)
+	    {
+	      double t = das[irowg];
+	      das[irowg] = das[icol];
+	      das[icol] = t;
+	    }
+	}
+      __syncthreads();
+
+      double piv = cov[icol * stride + icol];
+      if(piv == 0.0)
+	{
+	  if(tid == 0)
+	    {
+	      /* singular: atry = cgg + compacted da, as in the original err=2 path */
+	      int cnt = 0;
+	      for(int l = 1; l <= ma; l++)
+		{
+		  if(CUDA_ia[l])
+		    {
+		      cnt++;
+		      atry[bid][l] = cgg[bid][l] + das[cnt];
+		    }
+		}
+	      err_s = 2;
+	    }
+	  __syncthreads();
+	  break;
+	}
+
+      if(tid == 0)
+	{
+	  double pv = __drcp_rn(piv);
+	  pivinv_s = pv;
+	  cov[icol * stride + icol] = 1.0;
+	  das[icol] *= pv;
+	}
+      __syncthreads();
+      double pivinv = pivinv_s;
+
+      for(int x = 1 + tid; x <= mf; x += 128)
+	cov[icol * stride + x] *= pivinv;
+      __syncthreads();
+
+      /* eliminate all other rows: warp per row, lanes over columns */
+      int wid = tid >> 5, lane = tid & 31;
+      for(int ll = 1 + wid; ll <= mf; ll += 4)
+	{
+	  if(ll == icol) continue;
+	  double dum = cov[ll * stride + icol];
+	  __syncwarp();
+	  double const * __restrict__ prow = cov + icol * stride;
+	  double * __restrict__ lrow = cov + ll * stride;
+#pragma unroll 2
+	  for(int c = 1 + lane; c <= mf; c += 32)
+	    {
+	      double base = (c == icol) ? 0.0 : lrow[c];
+	      lrow[c] = base - prow[c] * dum;
+	    }
+	  if(lane == 0)
+	    das[ll] -= das[icol] * dum;
+	}
+      __syncthreads();
+    }
+
+  /* da goes back to global (consumed by mrqmin_2_end and the atry update) */
+  for(int x = 1 + tid; x <= mf; x += 128)
+    CUDA_LCC->da[x] = das[x];
+  __syncthreads();
+
+  if(err_s)
+    return;
+
+  for(int n = tid; n < ma; n += 128)
+    {
+      if(__ldca(&CUDA_ia[n + 1]))
+	atry[bid][n + 1] = cgg[bid][n + 1] + __ldca(&CUDA_LCC->da[n]);
+    }
 }
 
 // ===================== OPTIMIZED PATH ends =====================
@@ -4026,13 +4238,13 @@ __launch_bounds__(512, 1) //768
 #endif  
 CudaCalculateIter1Mrqmin1End(void)
 {
-  int bid = blockIdx();
+  int bid = blockIdx.x; /* one 128-thread block per bid, dynamic shared memory */
   auto CUDA_LCC = &CUDA_CC[bid];
 
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
-  
-  mrqmin_1_end(CUDA_LCC, CUDA_ma, CUDA_mfit, /*CUDA_mfit + 1,*/ CUDA_BLOCK_DIM);
+
+  mrqmin_1_end_opt(CUDA_LCC, bid);
 }
 
 
