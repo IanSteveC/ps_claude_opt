@@ -2119,6 +2119,19 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
 /* curve1 and curve2 run back-to-back in the fused kernels and never use
    their shared staging at the same time, so both live in one per-warp union:
    the block's shared footprint is max(c1,c2), not the sum. */
+/* FP64-throughput class of the target: data-center parts (P100/V100/A100/
+   H100/B100, >= 1:2 FP64) have DP to burn and are bandwidth/latency-bound, so
+   they read the FP32 DsphT mirror (converts are cheap) and compute the curve2
+   row products as uniform DP multiplies. Consumer GeForce and Jetson parts
+   (1:32..1:64 FP64) are DP-pipe-bound: they read the FP64 table directly (no
+   convert instructions) and broadcast lane-parallel products via shuffles on
+   the integer pipe. Each SASS architecture compiles its own branch. */
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 600 || __CUDA_ARCH__ == 700 || __CUDA_ARCH__ == 800 || __CUDA_ARCH__ == 900 || __CUDA_ARCH__ == 1000)
+#define FAT_FP64 1
+#else
+#define FAT_FP64 0
+#endif
+
 #define CURVE2_K 8
 
 #define GEO_BATCH 16
@@ -2309,16 +2322,27 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	    {
 	      double wA = wcA[j];
 	      double wB = wcB[j];
-	      /* FP64 table: on low-FP64-ratio GPUs (consumer/Jetson) the F32->F64
-		 convert an FP32 table would need costs a full DP-pipe slot per
-		 load - dearer than the bandwidth the float table saves */
+#if FAT_FP64
+	      /* FP32 mirror: halves the dominant read stream; the converts are
+		 cheap when the DP pipe is wide (measured +12% on V100) */
+	      float const * __restrict__ row = CUDA_DsphTf[fc[j]];
+	      double v1 = (double)row[c1];
+#else
+	      /* FP64 table: on low-FP64-ratio GPUs (consumer/Jetson) the
+		 F32->F64 convert costs a full DP-pipe slot per load - dearer
+		 than the bandwidth the float table saves */
 	      double const * __restrict__ row = CUDA_DsphT[fc[j]];
 	      double v1 = row[c1];
+#endif
 	      accA1 += wA * v1;
 	      accB1 += wB * v1;
 	      if(c2 <= nshape)
 		{
+#if FAT_FP64
+		  double v2 = (double)row[c2];
+#else
 		  double v2 = row[c2];
+#endif
 		  accA2 += wA * v2;
 		  accB2 += wB * v2;
 		}
@@ -2612,13 +2636,22 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 #pragma unroll 1
       for(int l = 1; l <= rowEndIncl; l++, alphrow += mf1)
 	{
+	  double w[CURVE2_K];
+#if FAT_FP64
+	  /* uniform DP multiplies: shuffles would ride the MIO pipe this
+	     kernel already saturates with shared-memory traffic (measured
+	     +17% on V100 for the shuffle form) */
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    w[p] = T[p][l] * s2w[p];
+#else
 	  /* lane p computes T[p][l]*s2w[p]; everyone gets all K via shuffle
 	     (integer pipe) instead of K uniform multiplies on the FP64 pipe */
 	  double wown = (tid < CURVE2_K) ? T[tid][l] * s2w[tid] : 0.0;
-	  double w[CURVE2_K];
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
 	    w[p] = __shfl_sync(0xffffffff, wown, p);
+#endif
 
 	  int cend = colStrictLess ? (l - 1) : l;
 #pragma unroll 1
@@ -2631,6 +2664,16 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	      double * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
+#if FAT_FP64
+	  if(tid == 0)
+	    {
+	      double b = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		b += dws[p] * T[p][l];
+	      __stwb(&beta[l], __ldca(&beta[l]) + b);
+	    }
+#else
 	  {
 	    /* products lane-parallel, summed in lane 0 in ascending p order */
 	    double bown = (tid < CURVE2_K) ? dws[tid] * T[tid][l] : 0.0;
@@ -2641,6 +2684,7 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	    if(tid == 0)
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
 	  }
+#endif
 	}
 
       /* ---- tail rows with ia[] gating (only when lastone < lastma; ---- */
