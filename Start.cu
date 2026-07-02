@@ -2010,15 +2010,44 @@ __global__ void CudaBuildDsphT(void)
 // visibility/brightness sums, then switch to lanes-=-parameters for the
 // g-coefficient derivative sums (coalesced DsphT rows, coalesced dytempT row
 // writes). dave[] column sums fall out for free in registers.
+/* curve1 and curve2 run back-to-back in the fused kernels and never use
+   their shared staging at the same time, so both live in one per-warp union:
+   the block's shared footprint is max(c1,c2), not the sum. */
+#define CURVE2_K 8
+
+struct c1share
+{
+  double wc[32];   /* compacted visible-facet weights */
+  int    fc[32];   /* compacted facet indices */
+  double pt[26];   /* per-point geometry: 0..15 gde, 16..21 ge, 22 scale, 23 ff, 24 d2, 25 alpha */
+  double inv[11];  /* invariants: 0..4 phase model, 5 cl, 6 cls, 7..10 Blmat */
+};
+
+struct c2share
+{
+  double T[CURVE2_K][DYT_STRIDE];
+  double s2w[CURVE2_K];
+  double dws[CURVE2_K];
+};
+
+union mrqshare
+{
+  c1share c1;
+  c2share c2;
+};
+
 __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CUDA_LCC,
 						  double const * __restrict__ a,
-						  int Lpoints, int bid)
+						  int Lpoints, int bid,
+						  c1share * __restrict__ shw)
 {
   int tid = threadIdx.x;
-  __shared__ double sh_dbr[BLOCKX4][32];
-  __shared__ double sh_gde[BLOCKX4][16];
-  double * __restrict__ dbrw = sh_dbr[threadIdx.y];
-  double * __restrict__ gdew = sh_gde[threadIdx.y];
+  /* per-warp staging keeps every warp-uniform value out of per-thread
+     registers (occupancy is register-bound) */
+  double * __restrict__ wc = shw->wc;
+  int    * __restrict__ fc = shw->fc;
+  double * __restrict__ pt = shw->pt;
+  double * __restrict__ inv = shw->inv;
 
   int nc = CUDA_ncoef0;
   int ma = CUDA_ma;
@@ -2026,18 +2055,23 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   int nf = CUDA_Numfac;
   int lnp0 = npg[0][bid];
 
-  /* scalar model parameters (identical in every lane) */
-  double nc00 = a[nc + 0];
-  double nc01 = a[nc + 1];
-  double nc02r = __drcp_rn(a[nc + 2]);
-  double nc03 = a[nc + 3];
-  double nc02r2 = nc02r * nc02r;
-  double phi0 = CUDA_Phi_0;
-  double cl = exp(a[ma - 1]); /* Lambert */
-  double cls = a[ma];         /* Lommel-Seeliger */
-
-  double4 dsc = SCBLmat[bid];
-  double Blmat02 = dsc.x, Blmat22 = dsc.y, Blmat10 = dsc.z, Blmat11 = dsc.w;
+  if(tid == 0)
+    {
+      inv[0] = a[nc + 0];
+      inv[1] = a[nc + 1];
+      double r = __drcp_rn(a[nc + 2]);
+      inv[2] = r;
+      inv[3] = a[nc + 3];
+      inv[4] = r * r;
+      inv[5] = exp(a[ma - 1]); /* Lambert */
+      inv[6] = a[ma];          /* Lommel-Seeliger */
+      double4 dsc = SCBLmat[bid];
+      inv[7] = dsc.x;   /* Blmat02 */
+      inv[8] = dsc.y;   /* Blmat22 */
+      inv[9] = dsc.z;   /* Blmat10 */
+      inv[10] = dsc.w;  /* Blmat11 */
+    }
+  __syncwarp();
 
   int c1 = 2 + tid;        /* parameter columns owned by this lane */
   int c2 = 34 + tid;
@@ -2047,104 +2081,109 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   double const * __restrict__ areap = &(Areag[bid][0]);
   double * __restrict__ dytemp = CUDA_LCC->dytemp;
   double * __restrict__ ytemp = CUDA_LCC->ytemp;
-  bool fewBlocks = (gridDim.x * blockDim.y) <= 512;
 
 #pragma unroll 1
   for(int jp = 0; jp < Lpoints; jp++)
     {
-      int lnp = lnp0 + jp;
+      { /* geometry: identical in every lane (same math as the original);
+	   every output is parked in shared so only the accumulators stay
+	   in registers across the facet loop */
+	int lnp = lnp0 + jp;
 
-      double ee_1  = CUDA_ee[0][lnp];
-      double ee0_1 = CUDA_ee0[0][lnp];
-      double ee_2  = CUDA_ee[1][lnp];
-      double ee0_2 = CUDA_ee0[1][lnp];
-      double ee_3  = CUDA_ee[2][lnp];
-      double ee0_3 = CUDA_ee0[2][lnp];
-      double t = CUDA_tim[lnp];
+	double ee_1  = CUDA_ee[0][lnp];
+	double ee0_1 = CUDA_ee0[0][lnp];
+	double ee_2  = CUDA_ee[1][lnp];
+	double ee0_2 = CUDA_ee0[1][lnp];
+	double ee_3  = CUDA_ee[2][lnp];
+	double ee0_3 = CUDA_ee0[2][lnp];
+	double t = CUDA_tim[lnp];
 
-      double alph = acos(((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3);
-      double f = nc00 * t + phi0;
-      double ff = exp2(-1.44269504088896 * (alph * nc02r));
-      f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
-      double scale = 1.0 + nc01 * ff + nc03 * alph;
-      double d2 = nc01 * ff * alph * nc02r2;
+	double alph = acos(((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3);
+	double f = inv[0] * t + CUDA_Phi_0;
+	double ff = exp2(-1.44269504088896 * (alph * inv[2]));
+	f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
+	double scale = 1.0 + inv[1] * ff + inv[3] * alph;
+	double d2 = inv[1] * ff * alph * inv[4];
 
-      double sf, cf;
-      __builtin_assume(f > (-2.0 * PI) && f < (2.0 * PI));
-      sincos(f, &sf, &cf);
+	double sf, cf;
+	__builtin_assume(f > (-2.0 * PI) && f < (2.0 * PI));
+	sincos(f, &sf, &cf);
 
-      /* rotation matrices, identical in every lane (same math as original) */
-      double Blmat00 = Blmat11 * Blmat22;
-      double Blmat01 = Blmat22 * -Blmat10;
-      double msf = -sf;
-      double cbl00 = cf * Blmat00;
-      double sbl10 = sf * Blmat10;
-      double cbl10 = cf * Blmat10;
-      double sbl11 = sf * Blmat11;
-      double cbl11 = cf * Blmat11;
-      double cbl01 = cf * Blmat01;
-      double sbl00 = msf * Blmat00;
-      double sbl01 = msf * Blmat01;
+	double Blmat02 = inv[7], Blmat22 = inv[8], Blmat10 = inv[9], Blmat11 = inv[10];
+	double Blmat00 = Blmat11 * Blmat22;
+	double Blmat01 = Blmat22 * -Blmat10;
+	double msf = -sf;
+	double cbl00 = cf * Blmat00;
+	double sbl10 = sf * Blmat10;
+	double cbl10 = cf * Blmat10;
+	double sbl11 = sf * Blmat11;
+	double cbl11 = cf * Blmat11;
+	double cbl01 = cf * Blmat01;
+	double sbl00 = msf * Blmat00;
+	double sbl01 = msf * Blmat01;
 
-      double gde020 = Blmat00 * ee_1 + Blmat01 * ee_2 + Blmat02 * ee_3;
-      double gde120 = Blmat00 * ee0_1 + Blmat01 * ee0_2 + Blmat02 * ee0_3;
+	double gde020 = Blmat00 * ee_1 + Blmat01 * ee_2 + Blmat02 * ee_3;
+	double gde120 = Blmat00 * ee0_1 + Blmat01 * ee0_2 + Blmat02 * ee0_3;
 
-      double tmat41 = -cbl01 - sbl11;
-      double tmat51 = -sbl01 - cbl11;
-      double tmat42 = cbl00 + sbl10;
-      double tmat52 = sbl00 + cbl10;
+	double tmat41 = -cbl01 - sbl11;
+	double tmat51 = -sbl01 - cbl11;
+	double tmat42 = cbl00 + sbl10;
+	double tmat52 = sbl00 + cbl10;
 
-      double gde001 = tmat41 * ee_1 + tmat42 * ee_2;
-      double gde101 = tmat41 * ee0_1 + tmat42 * ee0_2;
-      double gde011 = tmat51 * ee_1 + tmat52 * ee_2;
-      double gde111 = tmat51 * ee0_1 + tmat52 * ee0_2;
+	double gde001 = tmat41 * ee_1 + tmat42 * ee_2;
+	double gde101 = tmat41 * ee0_1 + tmat42 * ee0_2;
+	double gde011 = tmat51 * ee_1 + tmat52 * ee_2;
+	double gde111 = tmat51 * ee0_1 + tmat52 * ee0_2;
 
-      double tmat01 = cbl00 + sbl10;
-      double tmat11 = sbl00 + cbl10;
-      double tmat02 = cbl01 + sbl11;
-      double tmat12 = sbl01 + cbl11;
-      double tmat03 = cf  * Blmat02;
-      double tmat13 = msf * Blmat02;
+	double tmat01 = cbl00 + sbl10;
+	double tmat11 = sbl00 + cbl10;
+	double tmat02 = cbl01 + sbl11;
+	double tmat12 = sbl01 + cbl11;
+	double tmat03 = cf  * Blmat02;
+	double tmat13 = msf * Blmat02;
 
-      double ge00 = tmat01 * ee_1 + tmat02 * ee_2 + tmat03 * ee_3;
-      double ge10 = tmat01 * ee0_1 + tmat02 * ee0_2 + tmat03 * ee0_3;
-      double ge01 = tmat11 * ee_1 + tmat12 * ee_2 + tmat13 * ee_3;
-      double ge11 = tmat11 * ee0_1 + tmat12 * ee0_2 + tmat13 * ee0_3;
+	double ge00 = tmat01 * ee_1 + tmat02 * ee_2 + tmat03 * ee_3;
+	double ge10 = tmat01 * ee0_1 + tmat02 * ee0_2 + tmat03 * ee0_3;
+	double ge01 = tmat11 * ee_1 + tmat12 * ee_2 + tmat13 * ee_3;
+	double ge11 = tmat11 * ee0_1 + tmat12 * ee0_2 + tmat13 * ee0_3;
 
-      double Blmat20 = Blmat11 * -Blmat02;
-      double Blmat21 = Blmat02 * Blmat10;
-      double gde002 = t * ge01;
-      double gde102 = t * ge11;
-      double gde012 = -t * ge00;
-      double gde112 = -t * ge10;
+	double Blmat20 = Blmat11 * -Blmat02;
+	double Blmat21 = Blmat02 * Blmat10;
+	double gde002 = t * ge01;
+	double gde102 = t * ge11;
+	double gde012 = -t * ge00;
+	double gde112 = -t * ge10;
 
-      double ge02 = Blmat20 * ee_1 + Blmat21 * ee_2 + Blmat22 * ee_3;
-      double ge12 = Blmat20 * ee0_1 + Blmat21 * ee0_2 + Blmat22 * ee0_3;
-      double gde021 = -Blmat21 * ee_1 + Blmat20 * ee_2;
-      double gde121 = -Blmat21 * ee0_1 + Blmat20 * ee0_2;
+	double ge02 = Blmat20 * ee_1 + Blmat21 * ee_2 + Blmat22 * ee_3;
+	double ge12 = Blmat20 * ee0_1 + Blmat21 * ee0_2 + Blmat22 * ee0_3;
+	double gde021 = -Blmat21 * ee_1 + Blmat20 * ee_2;
+	double gde121 = -Blmat21 * ee0_1 + Blmat20 * ee0_2;
 
-      double tmat31 = sf * Blmat20;
-      double tmat32 = sf * Blmat21;
-      double tmat33 = sf * Blmat22;
-      double tmat21 = cf * -Blmat20;
-      double tmat22 = cf * -Blmat21;
-      double tmat23 = cf * -Blmat22;
+	double tmat31 = sf * Blmat20;
+	double tmat32 = sf * Blmat21;
+	double tmat33 = sf * Blmat22;
+	double tmat21 = cf * -Blmat20;
+	double tmat22 = cf * -Blmat21;
+	double tmat23 = cf * -Blmat22;
 
-      double gde000 = tmat21 * ee_1 + tmat22 * ee_2 + tmat23 * ee_3;
-      double gde100 = tmat21 * ee0_1 + tmat22 * ee0_2 + tmat23 * ee0_3;
-      double gde010 = tmat31 * ee_1 + tmat32 * ee_2 + tmat33 * ee_3;
-      double gde110 = tmat31 * ee0_1 + tmat32 * ee0_2 + tmat33 * ee0_3;
+	double gde000 = tmat21 * ee_1 + tmat22 * ee_2 + tmat23 * ee_3;
+	double gde100 = tmat21 * ee0_1 + tmat22 * ee0_2 + tmat23 * ee0_3;
+	double gde010 = tmat31 * ee_1 + tmat32 * ee_2 + tmat33 * ee_3;
+	double gde110 = tmat31 * ee0_1 + tmat32 * ee0_2 + tmat33 * ee0_3;
 
-      /* park the 16 gde in shared (uniform per warp) to relieve registers */
-      if(tid == 0)
-	{
-	  gdew[0] = gde000;  gdew[1] = gde010;  gdew[2] = gde020;
-	  gdew[3] = gde100;  gdew[4] = gde110;  gdew[5] = gde120;
-	  gdew[6] = gde001;  gdew[7] = gde011;  gdew[8] = gde021;
-	  gdew[9] = gde101;  gdew[10] = gde111; gdew[11] = gde121;
-	  gdew[12] = gde002; gdew[13] = gde012;
-	  gdew[14] = gde102; gdew[15] = gde112;
-	}
+	if(tid == 0)
+	  {
+	    pt[0] = gde000;  pt[1] = gde010;  pt[2] = gde020;
+	    pt[3] = gde100;  pt[4] = gde110;  pt[5] = gde120;
+	    pt[6] = gde001;  pt[7] = gde011;  pt[8] = gde021;
+	    pt[9] = gde101;  pt[10] = gde111; pt[11] = gde121;
+	    pt[12] = gde002; pt[13] = gde012;
+	    pt[14] = gde102; pt[15] = gde112;
+	    pt[16] = ge00;   pt[17] = ge01;   pt[18] = ge02;
+	    pt[19] = ge10;   pt[20] = ge11;   pt[21] = ge12;
+	    pt[22] = scale;  pt[23] = ff;     pt[24] = d2;   pt[25] = alph;
+	  }
+      }
       __syncwarp();
 
       double br = 0, tmp1 = 0, tmp2 = 0, tmp3 = 0, tmp4 = 0, tmp5 = 0;
@@ -2158,10 +2197,11 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	  if(i < nf)
 	    {
 	      double n0 = CUDA_Nor[0][i], n1 = CUDA_Nor[1][i], n2 = CUDA_Nor[2][i];
-	      double lmu  = ge00 * n0 + ge01 * n1 + ge02 * n2;
-	      double lmu0 = ge10 * n0 + ge11 * n1 + ge12 * n2;
+	      double lmu  = pt[16] * n0 + pt[17] * n1 + pt[18] * n2;
+	      double lmu0 = pt[19] * n0 + pt[20] * n1 + pt[21] * n2;
 	      if((lmu > TINY) && (lmu0 > TINY))
 		{
+		  double cl = inv[5], cls = inv[6];
 		  double dnom = lmu + lmu0;
 		  double dnom_1 = __drcp_rn(dnom);
 		  double ar = __ldca(&areap[i]);
@@ -2173,12 +2213,12 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 		  double dsmu  = cls * (lmu0_dnom * lmu0_dnom) + cl * lmu0;
 		  double dsmu0 = cls * (lmu_dnom * lmu_dnom) + cl * lmu;
 
-		  double sum1  = n0 * gdew[0] + n1 * gdew[1] + n2 * gdew[2];
-		  double sum10 = n0 * gdew[3] + n1 * gdew[4] + n2 * gdew[5];
-		  double sum2  = n0 * gdew[6] + n1 * gdew[7] + n2 * gdew[8];
-		  double sum20 = n0 * gdew[9] + n1 * gdew[10] + n2 * gdew[11];
-		  double sum3  = n0 * gdew[12] + n1 * gdew[13];
-		  double sum30 = n0 * gdew[14] + n1 * gdew[15];
+		  double sum1  = n0 * pt[0] + n1 * pt[1] + n2 * pt[2];
+		  double sum10 = n0 * pt[3] + n1 * pt[4] + n2 * pt[5];
+		  double sum2  = n0 * pt[6] + n1 * pt[7] + n2 * pt[8];
+		  double sum20 = n0 * pt[9] + n1 * pt[10] + n2 * pt[11];
+		  double sum3  = n0 * pt[12] + n1 * pt[13];
+		  double sum30 = n0 * pt[14] + n1 * pt[15];
 
 		  tmp1 += ar * (dsmu * sum1 + dsmu0 * sum10);
 		  tmp2 += ar * (dsmu * sum2 + dsmu0 * sum20);
@@ -2187,41 +2227,28 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 		  tmp5 += ar * lmu * lmu0 * dnom_1;
 		}
 	    }
-	  dbrw[tid] = dbr;
+
+	  /* ballot-compact this chunk's visible facets: the derivative sweep
+	     below becomes branch-free and its loads are independent, so they
+	     pipeline instead of serializing on the L1 scoreboard */
+	  unsigned vis = __ballot_sync(0xffffffff, dbr != 0.0);
+	  int cnt = __popc(vis);
+	  if(dbr != 0.0)
+	    {
+	      int pos = __popc(vis & ((1u << tid) - 1u));
+	      wc[pos] = dbr;
+	      fc[pos] = f0 + tid;
+	    }
 	  __syncwarp();
 
-	  /* derivative sweep for this facet chunk: lanes = parameters */
-	  int kend = nf - f0;
-	  if(kend > 32) kend = 32;
-	  if(!fewBlocks)
-	    {
-	      /* skip invisible facets: saves L1 bandwidth when the GPU is full */
 #pragma unroll 4
-	      for(int k = 0; k < kend; k++)
-		{
-		  double w = dbrw[k];
-		  if(w != 0.0)
-		    {
-		      double const * __restrict__ row = CUDA_DsphT[f0 + k];
-		      acc1 += w * row[c1];
-		      if(c2 <= nshape)
-			acc2 += w * row[c2];
-		    }
-		}
-	    }
-	  else
+	  for(int j = 0; j < cnt; j++)
 	    {
-	      /* tiny grids (precalc) are latency-bound: the branch-free stream
-		 pipelines the loads; w == 0 terms add exactly zero */
-#pragma unroll 8
-	      for(int k = 0; k < kend; k++)
-		{
-		  double w = dbrw[k];
-		  double const * __restrict__ row = CUDA_DsphT[f0 + k];
-		  acc1 += w * row[c1];
-		  if(c2 <= nshape)
-		    acc2 += w * row[c2];
-		}
+	      double w = wc[j];
+	      double const * __restrict__ row = CUDA_DsphT[fc[j]];
+	      acc1 += w * row[c1];
+	      if(c2 <= nshape)
+		acc2 += w * row[c2];
 	    }
 	  __syncwarp();
 	}
@@ -2239,6 +2266,8 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	}
 
       /* one dytempT row per point, lanes = parameters (coalesced) */
+      double scale = pt[22], ff = pt[23], d2 = pt[24], alph = pt[25];
+      double cl = inv[5];
       double ymod = br * scale;
       double * __restrict__ row = dytemp + (size_t)jp * DYT_STRIDE;
 
@@ -2268,6 +2297,10 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
       if(c2 <= ma) { row[c2] = v2; dave2 += v2; }
       if(tid == 0) ytemp[jp] = ymod;
       lave += ymod;
+
+      /* pt[] is re-written by lane 0 at the top of the next iteration; make
+	 sure every lane is done reading it (Volta lanes run independently) */
+      __syncwarp();
     } /* jp */
 
   if(c1 <= ma) dave[bid][c1 - 1] = dave1;
@@ -2364,21 +2397,18 @@ __device__ void __forceinline__ mrqcof_curve1_last_opt(freq_context * __restrict
 // arithmetic of each original I*/IA* variant (including their off-by-one
 // idiosyncrasies), so the touched address set matches the original per-point
 // code; only the per-point summation order inside a tile changes.
-#define CURVE2_K 8
 
 template<int RENORM>
 __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CUDA_LCC,
 						  double * __restrict__ alpha,
 						  double * __restrict__ beta,
 						  int lpoints, int bid,
-						  int rowEndIncl, int colOff, int colStrictLess)
+						  int rowEndIncl, int colOff, int colStrictLess,
+						  c2share * __restrict__ shw)
 {
-  __shared__ double sh_T[BLOCKX4][CURVE2_K][DYT_STRIDE];
-  __shared__ double sh_s2w[BLOCKX4][CURVE2_K];
-  __shared__ double sh_dws[BLOCKX4][CURVE2_K];
-  double (* __restrict__ T)[DYT_STRIDE] = sh_T[threadIdx.y];
-  double * __restrict__ s2w = sh_s2w[threadIdx.y];
-  double * __restrict__ dws = sh_dws[threadIdx.y];
+  double (* __restrict__ T)[DYT_STRIDE] = shw->T;
+  double * __restrict__ s2w = shw->s2w;
+  double * __restrict__ dws = shw->dws;
 
   int tid = threadIdx.x;
   int ma = CUDA_ma;
@@ -2468,32 +2498,28 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 #pragma unroll 1
       for(int l = 1; l <= rowEndIncl; l++, alphrow += mf1)
 	{
-	  double w0 = T[0][l] * s2w[0];
-	  double w1 = T[1][l] * s2w[1];
-	  double w2 = T[2][l] * s2w[2];
-	  double w3 = T[3][l] * s2w[3];
-	  double w4 = T[4][l] * s2w[4];
-	  double w5 = T[5][l] * s2w[5];
-	  double w6 = T[6][l] * s2w[6];
-	  double w7 = T[7][l] * s2w[7];
+	  double w[CURVE2_K];
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    w[p] = T[p][l] * s2w[p];
 
 	  int cend = colStrictLess ? (l - 1) : l;
 #pragma unroll 1
 	  for(int xx = tid; xx <= cend; xx += 32)
 	    {
-	      double acc = w0 * T[0][xx] + w1 * T[1][xx]
-		         + w2 * T[2][xx] + w3 * T[3][xx]
-		         + w4 * T[4][xx] + w5 * T[5][xx]
-		         + w6 * T[6][xx] + w7 * T[7][xx];
+	      double acc = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		acc += w[p] * T[p][xx];
 	      double * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
 	  if(tid == 0)
 	    {
-	      double b = dws[0] * T[0][l] + dws[1] * T[1][l]
-		       + dws[2] * T[2][l] + dws[3] * T[3][l]
-		       + dws[4] * T[4][l] + dws[5] * T[5][l]
-		       + dws[6] * T[6][l] + dws[7] * T[7][l];
+	      double b = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		b += dws[p] * T[p][l];
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
 	    }
 	}
@@ -2504,21 +2530,17 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
       for(int l = rowEndIncl + 1; l < lma; l++, alphrow += mf1)
 	{
 	  if(!CUDA_ia[l + 1]) continue;
-	  double w0 = T[0][l] * s2w[0];
-	  double w1 = T[1][l] * s2w[1];
-	  double w2 = T[2][l] * s2w[2];
-	  double w3 = T[3][l] * s2w[3];
-	  double w4 = T[4][l] * s2w[4];
-	  double w5 = T[5][l] * s2w[5];
-	  double w6 = T[6][l] * s2w[6];
-	  double w7 = T[7][l] * s2w[7];
+	  double w[CURVE2_K];
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    w[p] = T[p][l] * s2w[p];
 #pragma unroll 1
 	  for(int xx = tid; xx < lastone; xx += 32)
 	    {
-	      double acc = w0 * T[0][xx] + w1 * T[1][xx]
-		         + w2 * T[2][xx] + w3 * T[3][xx]
-		         + w4 * T[4][xx] + w5 * T[5][xx]
-		         + w6 * T[6][xx] + w7 * T[7][xx];
+	      double acc = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		acc += w[p] * T[p][xx];
 	      double * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
@@ -2529,19 +2551,19 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 		{
 		  if(CUDA_ia[m + 1])
 		    {
-		      double acc = w0 * T[0][m] + w1 * T[1][m]
-			         + w2 * T[2][m] + w3 * T[3][m]
-			         + w4 * T[4][m] + w5 * T[5][m]
-			         + w6 * T[6][m] + w7 * T[7][m];
+		      double acc = 0.0;
+#pragma unroll
+		      for(int p = 0; p < CURVE2_K; p++)
+			acc += w[p] * T[p][m];
 		      double * __restrict__ ap = alphrow + colOff + pos;
 		      __stwb(ap, __ldca(ap) + acc);
 		      pos++;
 		    }
 		}
-	      double b = dws[0] * T[0][l] + dws[1] * T[1][l]
-		       + dws[2] * T[2][l] + dws[3] * T[3][l]
-		       + dws[4] * T[4][l] + dws[5] * T[5][l]
-		       + dws[6] * T[6][l] + dws[7] * T[7][l];
+	      double b = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		b += dws[p] * T[p][l];
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
 	    }
 	}
@@ -4279,7 +4301,8 @@ CudaCalculateIter1Mrqcof1Curve2I0IA0(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone - 1, 0, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
 
@@ -4293,7 +4316,8 @@ CudaCalculateIter1Mrqcof1Curve2I0IA1(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
@@ -4307,7 +4331,8 @@ CudaCalculateIter1Mrqcof1Curve2I1IA0(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
@@ -4322,7 +4347,8 @@ CudaCalculateIter1Mrqcof1Curve2I1IA1(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone - 1, 1, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, 3, bid, CUDA_lastone - 1, 1, 0, &shu[threadIdx.y].c2);
 }
 
 
@@ -4342,7 +4368,8 @@ CudaCalculateIter1Mrqcof2Curve2I0IA0(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
 
-  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone - 1, 0, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
 
@@ -4361,7 +4388,8 @@ CudaCalculateIter1Mrqcof2Curve2I0IA1(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
 
-  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
@@ -4380,7 +4408,8 @@ CudaCalculateIter1Mrqcof2Curve2I1IA0(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
 
-  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
@@ -4399,17 +4428,14 @@ CudaCalculateIter1Mrqcof2Curve2I1IA1(void)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone - 1, 1, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, 3, bid, CUDA_lastone - 1, 1, 0, &shu[threadIdx.y].c2);
 }
 
 
 
 __global__ void
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(384, 1) //768
-#else
-__launch_bounds__(768, 1) //768
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4420,16 +4446,13 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 
   if(threadIdx.x == 0) { raveg[bid] = __drcp_rn(0.0); npg[0][bid] += lpoints; }
   __syncwarp();
-  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 0, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
 
 __global__ void 
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(512, 1) //768
-#else
-__launch_bounds__(768, 1) //768
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4440,17 +4463,14 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 
   if(threadIdx.x == 0) { raveg[bid] = __drcp_rn(0.0); npg[0][bid] += lpoints; }
   __syncwarp();
-  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
 
 __global__ void
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(256, 1) //768
-#else
-__launch_bounds__(512, 1) //512
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4459,17 +4479,14 @@ CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve1_opt(CUDA_LCC, cgg[bid], lpoints, bid);
-  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 0, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve1_opt(CUDA_LCC, cgg[bid], lpoints, bid, &shu[threadIdx.y].c1);
+  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
 
 __global__ void 
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(256, 1) //768
-#else
-__launch_bounds__(512, 1) //512
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof1CurveM12I1IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4478,8 +4495,9 @@ CudaCalculateIter1Mrqcof1CurveM12I1IA1(const int lpoints)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
 
-  mrqcof_curve1_opt(CUDA_LCC, cgg[bid], lpoints, bid);
-  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve1_opt(CUDA_LCC, cgg[bid], lpoints, bid, &shu[threadIdx.y].c1);
+  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
@@ -4580,11 +4598,7 @@ CudaCalculateIter1Mrqcof2Start(void)
 
 
 __global__ void
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(512, 1) //768
-#else
-__launch_bounds__(768, 1) //768
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4595,17 +4609,14 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 
   if(threadIdx.x == 0) { raveg[bid] = __drcp_rn(0.0); npg[0][bid] += lpoints; }
   __syncwarp();
-  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 1, 1, &shu[threadIdx.y].c2);
 }
 
 
 
 __global__ void
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(384, 1) //768
-#else
-__launch_bounds__(768, 1) //768
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4616,17 +4627,14 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 
   if(threadIdx.x == 0) { raveg[bid] = __drcp_rn(0.0); npg[0][bid] += lpoints; }
   __syncwarp();
-  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 0, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve2_opt<0>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
 
 
 __global__ void
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(256, 1) //768
-#else
-__launch_bounds__(512, 1) //512
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4635,19 +4643,16 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
 
-  mrqcof_curve1_opt(CUDA_LCC, atry[bid], lpoints, bid);
-  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone, 1, 1);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve1_opt(CUDA_LCC, atry[bid], lpoints, bid, &shu[threadIdx.y].c1);
+  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y].c2);
 }
 
 //ZZZ
 /* MOST TIME CONSUMINNG KERNEL MRQCOF2CURVEM12I1IA0*/
 
 __global__ void 
-#if (__CUDA_ARCH__ < 700)
-__launch_bounds__(256, 1) //768
-#else
-__launch_bounds__(448, 1) //512,, 448 fast
-#endif  
+__launch_bounds__(128, 5)
 CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4656,8 +4661,9 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
   uint flags = getFlags(bid);
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
 
-  mrqcof_curve1_opt(CUDA_LCC, atry[bid], lpoints, bid);
-  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 0, 0);
+  __shared__ mrqshare shu[BLOCKX4];
+  mrqcof_curve1_opt(CUDA_LCC, atry[bid], lpoints, bid, &shu[threadIdx.y].c1);
+  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
 //ZZZ
