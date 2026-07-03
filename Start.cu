@@ -2027,7 +2027,14 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
   double ee0_3 = CUDA_ee0[2][lnp];
   double t = CUDA_tim[lnp];
 
-  double alph = acos(((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3);
+  /* clamp: ee and ee0 are unit vectors, so the dot is mathematically in
+     [-1,1], but at opposition (solar phase ~0) it lands within ~1e-7 of 1.0
+     and a different (legal) FMA contraction on another architecture can round
+     it past 1.0 -- acos would then return NaN and one such point poisons the
+     chisq of every trial frequency. fmin/fmax return the dot unchanged
+     whenever it is already in range, so healthy results are bit-identical. */
+  double cdot = ((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3;
+  double alph = acos(fmin(1.0, fmax(-1.0, cdot)));
   double f = inv[0] * t + CUDA_Phi_0;
   double ff = exp2(-1.44269504088896 * (alph * inv[2]));
   f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
