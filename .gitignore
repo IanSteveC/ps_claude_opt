@@ -1,0 +1,14 @@
+# build artifacts
+*.o
+period_search_BOINC_cuda12000
+pscuda.device-link.o
+libstdc++.a
+libcudart_static.a
+libcudadevrt.a
+libcudart.so
+libcuda.so
+libnvidia-ml.so
+temp
+boinc_lockfile
+stderr.txt
+period_search_out
