@@ -59,8 +59,11 @@
 
 #ifdef _WIN32
 #include "boinc_win.h"
-#include "Windows.h"
-#include <Shlwapi.h>
+#include <windows.h>   /* lowercase: mingw-w64 headers on a case-sensitive fs */
+#include <shlwapi.h>
+#ifdef __MINGW32__
+#include <unistd.h>    /* mingw-w64 provides usleep here */
+#endif
 #include "Version.h"
 #else
 //#include "../win_build/config.h"

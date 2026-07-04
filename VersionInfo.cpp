@@ -1,4 +1,6 @@
+#if defined(_MSC_VER)
 #include "stdafx.h"
+#endif
 #include <windows.h>
 #include <tchar.h>
 

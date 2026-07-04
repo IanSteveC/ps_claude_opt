@@ -68,6 +68,8 @@ int msleep(long ms)
 /* mingw-w64: usleep comes from its <unistd.h>; the glibc sched_yield
    override below does not apply. Map the priority helper onto Win32. */
 #include <unistd.h>
+#include <cmath>
+using std::isnan;
 static void ps_setpriority_win(int prio)
 {
   SetPriorityClass(GetCurrentProcess(),

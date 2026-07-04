@@ -1,5 +1,5 @@
 #pragma once
-#include "Windows.h"
+#include <windows.h>
 
 bool GetVersionInfo(
 	LPCTSTR filename,

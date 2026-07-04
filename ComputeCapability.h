@@ -1,5 +1,9 @@
 #pragma once
+#ifndef PS_DRIVER_API
 #include <cuda_runtime_api.h>
+#else
+#include "cuda_iface.h"  /* provides the cudaDeviceProp lookalike */
+#endif
 class Cc
 {
 	int deviceCcMajor;

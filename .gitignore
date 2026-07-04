@@ -12,3 +12,10 @@ temp
 boinc_lockfile
 stderr.txt
 period_search_out
+w_*.o
+Start_win.fatbin
+ps_fatbin_win.c
+*.exe
+winlibs/
+build_win.log
+make_linux.log

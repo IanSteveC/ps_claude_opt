@@ -2000,7 +2000,7 @@ __device__ __align__(128) double CUDA_DsphT[MAX_N_FAC + 2][DYT_STRIDE];
    accumulation stays FP64 */
 __device__ __align__(128) float CUDA_DsphTf[MAX_N_FAC + 2][DYT_STRIDE];
 
-__global__ void CudaBuildDsphT(void)
+extern "C" __global__ void CudaBuildDsphT(void)
 {
   int f = blockIdx.x;
   int c = threadIdx.x;
@@ -4242,7 +4242,7 @@ __device__ void __forceinline__ MrqcofCurve23I0IA1(freq_context * __restrict__ C
 
 
 
-__global__ void CudaCalculatePrepare(int n_start, int n_max)
+extern "C" __global__ void CudaCalculatePrepare(int n_start, int n_max)
 {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int n = n_start + tid / N_POLES; // bid = (freq, pole) pair, pole-major within freq
@@ -4265,7 +4265,7 @@ __global__ void CudaCalculatePrepare(int n_start, int n_max)
 }
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(1024,1)
   CudaCalculatePreparePole(double freq_start, double freq_step, int n_start)
 {
@@ -4340,7 +4340,7 @@ __launch_bounds__(1024,1)
 }
 
 
-__global__ void CudaCalculateIter1Begin(int n_max)
+extern "C" __global__ void CudaCalculateIter1Begin(int n_max)
 {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   
@@ -4383,7 +4383,7 @@ __global__ void CudaCalculateIter1Begin(int n_max)
 
 }
 
-__global__ void 
+extern "C" __global__ void 
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4422,7 +4422,7 @@ CudaCalculateIter1Mrqcof1Start(void)
 
 
 //XXXXXX 21%
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4440,7 +4440,7 @@ CudaCalculateIter1Mrqmin1End(void)
 }
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(1024, 1) //768
 #else
@@ -4461,7 +4461,7 @@ CudaCalculateIter1Mrqmin2End(void)
 }
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(512, 1) 
 CudaCalculateIter1Mrqcof1Curve2I0IA0(void)
 {
@@ -4476,7 +4476,7 @@ CudaCalculateIter1Mrqcof1Curve2I0IA0(void)
 }
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(768, 1) 
 CudaCalculateIter1Mrqcof1Curve2I0IA1(void)
 {
@@ -4491,7 +4491,7 @@ CudaCalculateIter1Mrqcof1Curve2I0IA1(void)
 }
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(512, 1) 
 CudaCalculateIter1Mrqcof1Curve2I1IA0(void)
 {
@@ -4507,7 +4507,7 @@ CudaCalculateIter1Mrqcof1Curve2I1IA0(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(512, 1) 
 CudaCalculateIter1Mrqcof1Curve2I1IA1(void)
 {
@@ -4524,7 +4524,7 @@ CudaCalculateIter1Mrqcof1Curve2I1IA1(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(384, 1) //768
 #else
@@ -4544,7 +4544,7 @@ CudaCalculateIter1Mrqcof2Curve2I0IA0(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(384, 1) //768
 #else
@@ -4564,7 +4564,7 @@ CudaCalculateIter1Mrqcof2Curve2I0IA1(void)
 
 
 // SLOW
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(384, 1) //768
 #else
@@ -4584,7 +4584,7 @@ CudaCalculateIter1Mrqcof2Curve2I1IA0(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(384, 1) //768
 #else
@@ -4604,7 +4604,7 @@ CudaCalculateIter1Mrqcof2Curve2I1IA1(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 {
@@ -4621,7 +4621,7 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 }
 
 
-__global__ void 
+extern "C" __global__ void 
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 {
@@ -4639,7 +4639,7 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 {
@@ -4655,7 +4655,7 @@ CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 }
 
 
-__global__ void 
+extern "C" __global__ void 
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof1CurveM12I1IA1(const int lpoints)
 {
@@ -4671,7 +4671,7 @@ CudaCalculateIter1Mrqcof1CurveM12I1IA1(const int lpoints)
 }
 
 
-__global__ 
+extern "C" __global__ 
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4691,7 +4691,7 @@ void CudaCalculateIter1Mrqcof1Curve1LastI0(void)
 }
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4710,7 +4710,7 @@ CudaCalculateIter1Mrqcof1Curve1LastI1(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4730,7 +4730,7 @@ CudaCalculateIter1Mrqcof1End(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4767,7 +4767,7 @@ CudaCalculateIter1Mrqcof2Start(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 {
@@ -4785,7 +4785,7 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 {
@@ -4803,7 +4803,7 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 
 
 
-__global__ void
+extern "C" __global__ void
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 {
@@ -4821,7 +4821,7 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 //ZZZ
 /* MOST TIME CONSUMINNG KERNEL MRQCOF2CURVEM12I1IA0*/
 
-__global__ void 
+extern "C" __global__ void 
 __launch_bounds__(128, 4)
 CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
 {
@@ -4837,7 +4837,7 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
 }
 
 //ZZZ
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4856,7 +4856,7 @@ CudaCalculateIter1Mrqcof2Curve1LastI0(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4875,7 +4875,7 @@ CudaCalculateIter1Mrqcof2Curve1LastI1(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -4894,7 +4894,7 @@ CudaCalculateIter1Mrqcof2End(void)
 }
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(1024, 1) //768
 #else
@@ -4967,7 +4967,7 @@ CudaCalculateFinishPole(void)
 
 
 
-__global__ void
+extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
@@ -5089,12 +5089,12 @@ CudaCalculateIter2(void)
 }
 
 
-__global__ void CudaCalculateFinish(void) //  not used
+extern "C" __global__ void CudaCalculateFinish(void) //  not used
 {
 }
 
 
 
-__global__ void test(float *p)
+extern "C" __global__ void test(float *p)
 {
 }

@@ -43,6 +43,12 @@
 #include <cstring>
 #include <cstdlib>
 
+/* the code's CUDART_VERSION checks describe the toolkit that produced the
+   fatbin, which is the same 12.9 toolkit that provides cuda.h */
+#ifndef CUDART_VERSION
+#define CUDART_VERSION CUDA_VERSION
+#endif
+
 /* ---- cudart-lookalike types ---- */
 typedef CUresult cudaError_t;
 typedef CUstream cudaStream_t;
@@ -76,7 +82,7 @@ struct cudaDeviceProp {
 };
 
 /* ---- module / lookup state (inline: header-only, C++17) ---- */
-extern const unsigned char ps_fatbin[];   /* bin2c-embedded, see build_win.sh */
+extern "C" const char ps_fatbin[];   /* bin2c-embedded, see build_win.sh */
 
 inline CUmodule ps_module = nullptr;
 inline int ps_device_ordinal = 0;

@@ -1,7 +1,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include "ComputeCapability.h"
+#ifndef PS_DRIVER_API
 #include <cuda_runtime_api.h>
+#else
+#ifndef CUDART_VERSION
+#define CUDART_VERSION CUDA_VERSION  /* driver-API build: same 12.9 toolkit */
+#endif
+#endif
 
 Cc::Cc(const cudaDeviceProp deviceProp)
 {
