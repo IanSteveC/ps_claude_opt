@@ -2137,9 +2137,15 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
   /* AMD: high-FP64-rate parts (Radeon VII 1:4, CDNA gfx908/90a >=1:2) take the
      data-center "fat FP64" branch; RDNA consumer parts (~1:16..1:32) take the
      DP-pipe economy branch - same split the CUDA gate makes for DC vs GeForce. */
-  #if defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx942__)
+  #if defined(PS_FORCE_FATFP64)
+  #define FAT_FP64 1
+  #elif defined(PS_FORCE_ECON)
+  #define FAT_FP64 0
+  #elif defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx942__)
+  /* Radeon VII (measured: fat 93.9s < econ 99.8s) + CDNA (>=1:2): fat path */
   #define FAT_FP64 1
   #else
+  /* RDNA consumer (<=1:16 FP64): DP-pipe-bound, econ path */
   #define FAT_FP64 0
   #endif
 #elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 600 || __CUDA_ARCH__ == 700 || __CUDA_ARCH__ == 800 || __CUDA_ARCH__ == 900 || __CUDA_ARCH__ == 1000)
