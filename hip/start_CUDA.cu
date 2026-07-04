@@ -505,7 +505,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
       ps.dytemp = &pdytemp[(size_t)m * (max_lp + 1) * DYT_STRIDE];
       ps.ytemp = &pytemp[(size_t)m * (max_lp + 1)];
       freq_context *pt = &((freq_context*)pcc)[m];
-      err = hipMemcpyAsync(pt, &ps, sizeof(void*) * 4, hipMemcpyHostToDevice, stream3);
+      err = hipMemcpy(pt, &ps, sizeof(void*) * 4, hipMemcpyHostToDevice); /* HIP: pageable async of reused stack var races; blocking is safe (one-time) */
     }
 
   //hipStreamSynchronize(stream3);
@@ -888,7 +888,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
       ps.dytemp  = &pdytemp[(size_t)m * (max_lp + 1) * DYT_STRIDE];
       ps.ytemp   = &pytemp[(size_t)m * (max_lp + 1)];
       freq_context *pt = &((freq_context*)pcc)[m];
-      err = hipMemcpyAsync(pt, &ps, sizeof(void*) * 4, hipMemcpyHostToDevice, stream1);
+      err = hipMemcpy(pt, &ps, sizeof(void*) * 4, hipMemcpyHostToDevice); /* HIP: see precalc note */
       //usleep(1);
     }
 
