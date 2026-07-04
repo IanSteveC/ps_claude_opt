@@ -36,7 +36,7 @@ echo "[cc] host math files (C compiled as C++, matching the CUDA Makefile)"
 for f in trifac areanorm sphfunc ellfit ludcmp lubksb covsrt memory dot_product; do
   g++ -O3 -std=c++17 -I.. -c "../$f.c" -o "$OBJ/$f.o"
 done
-g++ -O3 -std=c++17 -DPS_HIP $INC -c ../period_search_BOINC.cpp -o "$OBJ/period_search_BOINC.o"
+g++ -O3 -std=c++17 -DPS_HIP $INC -c period_search_BOINC.cpp -o "$OBJ/period_search_BOINC.o"
 
 echo "[ld] $APP (device link + host link)"
 $HIPCC --hip-link -fgpu-rdc $OFF -o "$APP" \
