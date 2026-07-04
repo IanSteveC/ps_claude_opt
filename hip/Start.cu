@@ -2156,6 +2156,16 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
 
 #define CURVE2_K 8
 
+/* gfx906 (Radeon VII) hot curve kernels are VGPR-heavy (~140 VGPR -> only 1
+   wave/SIMD, which starves latency hiding). Requesting 4 waves is unachievable
+   so the allocator ignores it and stays at 1; requesting 2 makes it spill just
+   enough to fit a second resident wave. Other arches keep 4. */
+#if defined(__gfx906__)
+#define PS_CURVE_LB __launch_bounds__(128, 2)
+#else
+#define PS_CURVE_LB __launch_bounds__(128, 4)
+#endif
+
 #define GEO_BATCH 16
 
 struct c1share
@@ -4620,7 +4630,7 @@ CudaCalculateIter1Mrqcof2Curve2I1IA1(void)
 
 
 extern "C" __global__ void
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4637,7 +4647,7 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA0(const int lpoints)
 
 
 extern "C" __global__ void 
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4655,7 +4665,7 @@ CudaCalculateIter1Mrqcof1CurveM12I0IA1(const int lpoints)
 
 
 extern "C" __global__ void
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4671,7 +4681,7 @@ CudaCalculateIter1Mrqcof1CurveM12I1IA0(const int lpoints)
 
 
 extern "C" __global__ void 
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof1CurveM12I1IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4783,7 +4793,7 @@ CudaCalculateIter1Mrqcof2Start(void)
 
 
 extern "C" __global__ void
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4801,7 +4811,7 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA1(const int lpoints)
 
 
 extern "C" __global__ void
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 {
   int bid = blockIdx();
@@ -4819,7 +4829,7 @@ CudaCalculateIter1Mrqcof2CurveM12I0IA0(const int lpoints)
 
 
 extern "C" __global__ void
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 {
   int bid = blockIdx();
@@ -4837,7 +4847,7 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA1(const int lpoints)
 /* MOST TIME CONSUMINNG KERNEL MRQCOF2CURVEM12I1IA0*/
 
 extern "C" __global__ void 
-__launch_bounds__(128, 4)
+PS_CURVE_LB
 CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
 {
   int bid = blockIdx();
