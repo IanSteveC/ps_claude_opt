@@ -560,11 +560,11 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  if(in_rel[iC])
 		    if(ia[1])
 		      {
-			PS_LAUNCH(CudaCalculateIter1Mrqcof1CurveM12I1IA1, pdim4, pblock4, 0, stream3, l_points[iC]);
+			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA1, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		    else
 		      {
-			PS_LAUNCH(CudaCalculateIter1Mrqcof1CurveM12I1IA0, pdim4, pblock4, 0, stream3, l_points[iC]);
+			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA0, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		  else
 		    if(ia[1])
@@ -617,11 +617,11 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  if(in_rel[iC])
 		    if(ia[1])
 		      {
-			PS_LAUNCH(CudaCalculateIter1Mrqcof2CurveM12I1IA1, pdim4, pblock4, 0, stream3, l_points[iC]);
+			{ PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA1, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		    else
 		      {
-			PS_LAUNCH(CudaCalculateIter1Mrqcof2CurveM12I1IA0, pdim4, pblock4, 0, stream3, l_points[iC]);
+			{ PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA0, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		  else
 		    if(ia[1])
@@ -974,11 +974,11 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 		  if(in_rel[iC])
 		    if(ia[1])
 		      {
-			PS_LAUNCH(CudaCalculateIter1Mrqcof1CurveM12I1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]);
+			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		      }
 		    else
 		      {
-			PS_LAUNCH(CudaCalculateIter1Mrqcof1CurveM12I1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]);
+			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		      }
 		  else
 		    if(ia[1])
@@ -1031,9 +1031,9 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 		  sched_yield();
 		  if(in_rel[iC])
 		    if(ia[1])
-		      PS_LAUNCH(CudaCalculateIter1Mrqcof2CurveM12I1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]);
+		      { PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		    else
-		      PS_LAUNCH(CudaCalculateIter1Mrqcof2CurveM12I1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]);
+		      { PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		  else
 		    if(ia[1])
 		      PS_LAUNCH(CudaCalculateIter1Mrqcof2CurveM12I0IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]);

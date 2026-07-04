@@ -4861,13 +4861,93 @@ CudaCalculateIter1Mrqcof2CurveM12I1IA0(const int lpoints)
   mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y].c2);
 }
 
+/* ---- split of the M12 I1 kernels (curve1 + curve2 fused) into two kernels.
+   The merge is a locality win on register-rich NVIDIA, but on AMD it pins the
+   fused kernel's register pressure so only ~2 waves/SIMD are resident on
+   gfx906. dytemp already round-trips through GLOBAL memory between the two
+   phases even when fused, so splitting adds no memory traffic; the kernel
+   boundary supplies the cross-thread barrier. Each half carries far fewer live
+   values -> higher occupancy -> better latency hiding. The host launches these
+   two in place of the fused M12 I1 kernel. */
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof1Curve1Mid(const int lpoints)
+{
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
+  __shared__ c1share shu[BLOCKX4];
+  mrqcof_curve1_opt(CUDA_LCC, cgg[bid], lpoints, bid, &shu[threadIdx.y]);
+}
+
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof2Curve1Mid(const int lpoints)
+{
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
+  __shared__ c1share shu[BLOCKX4];
+  mrqcof_curve1_opt(CUDA_LCC, atry[bid], lpoints, bid, &shu[threadIdx.y]);
+}
+
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof1Curve2MidI1IA0(const int lpoints)
+{
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
+  __shared__ c2share shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y]);
+}
+
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof1Curve2MidI1IA1(const int lpoints)
+{
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
+  __shared__ c2share shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, alphag[bid] - 1, betag[bid] - 1, lpoints, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y]);
+}
+
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof2Curve2MidI1IA0(const int lpoints)
+{
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
+  __shared__ c2share shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone - 1, 0, 0, &shu[threadIdx.y]);
+}
+
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof2Curve2MidI1IA1(const int lpoints)
+{
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
+  __shared__ c2share shu[BLOCKX4];
+  mrqcof_curve2_opt<1>(CUDA_LCC, CUDA_LCC->covar, CUDA_LCC->da, lpoints, bid, CUDA_lastone, 1, 1, &shu[threadIdx.y]);
+}
+
 //ZZZ
 extern "C" __global__ void
 #if (__CUDA_ARCH__ < 700)
 __launch_bounds__(512, 1) //768
 #else
 __launch_bounds__(1024, 1) //768
-#endif  
+#endif
 CudaCalculateIter1Mrqcof2Curve1LastI0(void)
 {
   int bid = blockIdx();
