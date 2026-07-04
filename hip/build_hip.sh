@@ -19,7 +19,7 @@ BOINC_DIR="${BOINC_DIR:-$HOME/builds/boinc}"
 OBJ=obj
 mkdir -p "$OBJ"
 
-ARCHS="${ARCHS:-gfx906 gfx908 gfx90a gfx1010 gfx1030 gfx1100 gfx1200}"
+ARCHS="${ARCHS:-gfx906 gfx908 gfx90a gfx1010 gfx1012 gfx1030 gfx1031 gfx1032 gfx1034 gfx1035 gfx1100 gfx1101 gfx1102 gfx1103 gfx1200 gfx1201}"
 OFF=""; for a in $ARCHS; do OFF="$OFF --offload-arch=$a"; done
 
 INC="-I. -I.. -I$BOINC_DIR -I$BOINC_DIR/api -I$BOINC_DIR/lib"
