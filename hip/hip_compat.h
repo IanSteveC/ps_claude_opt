@@ -65,15 +65,35 @@ T ps_shfl(T v, int s)               { return __shfl(v, s, PS_WARP); }
 #define __shfl_xor_sync(mask, v, m)   ps_shfl_xor(v, m)
 #define __shfl_sync(mask, v, s)       ps_shfl(v, s)
 
-/* __ballot_sync -> HIP __ballot (returns 64-bit on AMD; the one call site uses
-   it only for a nonzero test, so width is immaterial) */
-#define __ballot_sync(mask, pred)     __ballot(pred)
+/* __ballot_sync: CUDA returns a 32-bit mask of the 32-lane warp. On AMD
+   __ballot returns a 64-bit mask of the whole physical wave. On wave64 the
+   two 32-thread logical warps (threadIdx.y groups) share one wave, so the raw
+   64-bit ballot mixes them - fatal for the stream-compaction call sites, which
+   derive a count and prefix-sum position from it (mixed -> count up to 64 ->
+   the 32-entry fc[]/wc[] staging arrays overflow -> garbage facet index ->
+   fault). ps_ballot32 returns only the 32 bits for THIS lane's half-wave; the
+   code's `tid = threadIdx.x` equals the lane's index within that half, so the
+   `(1u<<tid)` prefix mask and __popc stay correct. On wave32 the high half is
+   empty and this is a no-op. */
+__device__ __forceinline__ unsigned ps_ballot32(int pred)
+{
+    unsigned long long b = __ballot(pred);
+    return (__lane_id() & 32u) ? (unsigned)(b >> 32) : (unsigned)(b & 0xffffffffu);
+}
+#define __ballot_sync(mask, pred)     ps_ballot32(pred)
 
-/* the kernels lean on implicit warp-synchronous execution; __syncwarp is a
-   no-op on a single wave. Keep a barrier-free definition (a full __syncthreads
-   here would be wrong - these sit inside divergent per-lane reductions). */
+/* CUDA __syncwarp() both synchronizes the warp AND orders its shared-memory
+   accesses. The kernels use it as a producer/consumer barrier for LDS-staged
+   arrays (fc[], wc[], geo[]): some lanes write, then all lanes read what other
+   lanes wrote. A no-op is WRONG on AMD - a wavefront executes in lockstep, but
+   cross-lane LDS writes are only guaranteed visible after an LDS wait, so the
+   consumer reads garbage (garbage facet index -> garbage table pointer ->
+   fault). __threadfence_block() emits the s_waitcnt lgkmcnt(0) that makes the
+   staged writes visible; combined with lockstep execution that reproduces
+   CUDA's warp-synchronous semantics, without the deadlock risk a full
+   __syncthreads() carries in the divergent reduction tails. */
 #ifndef __syncwarp
-#define __syncwarp(...) ((void)0)
+#define __syncwarp(...) __threadfence_block()
 #endif
 
 #endif /* __HIP_PLATFORM_AMD__ */
