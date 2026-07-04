@@ -19,3 +19,6 @@ ps_fatbin_win.c
 winlibs/
 build_win.log
 make_linux.log
+hip/obj/
+hip/*.log
+hip/period_search_BOINC_rocm_claude

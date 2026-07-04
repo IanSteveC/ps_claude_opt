@@ -37,8 +37,10 @@
 #include "declarations.h"
 #include "constants.h"
 #include "globals.h"
+#if !defined(PS_HIP) && !defined(PS_DRIVER_API)
 #include "cuda.h"
 #include <cuda_runtime.h>
+#endif
 
 // This file is part of BOINC.
 // http://boinc.berkeley.edu
