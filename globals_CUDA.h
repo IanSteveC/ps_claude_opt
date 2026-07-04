@@ -1,9 +1,11 @@
 #pragma once
 
+#ifndef PS_DRIVER_API
 #include <cuda_runtime_api.h>
+#endif
 
 //  NOTE Fake declaration to satisfy intellisense. See https://stackoverflow.com/questions/39980645/enable-code-indexing-of-cuda-in-clion/39990500
-#ifndef __CUDACC__
+#if !defined(__CUDACC__) && !defined(PS_DRIVER_API)
 //#define __host__
 //#define __device__
 //#define __shared__
@@ -55,6 +57,7 @@ __device__ __device_builtin__ double __hiloint2double(int hi, int lo);
 #define N_BLOCKS 4096
 
 
+#ifndef PS_DRIVER_API
 //global to all freq
 __constant__ extern int CUDA_Ncoef, CUDA_Numfac, CUDA_Numfac1, CUDA_Dg_block;
 __constant__ extern int CUDA_ma, CUDA_mfit, /*CUDA_mfit1,*/ CUDA_lastone, CUDA_lastma, CUDA_ncoef0;
@@ -86,8 +89,9 @@ __device__ extern double CUDA_brightness[MAX_N_OBS+1];
 __device__ extern double CUDA_sig[MAX_N_OBS+1];
 __device__ extern double CUDA_sigr2[MAX_N_OBS+1]; // (1/CUDA_sig^2) /*[MAX_N_OBS+1]*/;
 __device__ extern double CUDA_Weight[MAX_N_OBS+1];
-__device__ extern double CUDA_ee[3][MAX_N_OBS+1]; 
-__device__ extern double CUDA_ee0[3][MAX_N_OBS+1]; 
+__device__ extern double CUDA_ee[3][MAX_N_OBS+1];
+__device__ extern double CUDA_ee0[3][MAX_N_OBS+1];
+#endif /* !PS_DRIVER_API */
 
 
 // dytemp is transposed since the 2026 rewrite: row = data point, column = parameter,
@@ -108,9 +112,11 @@ struct freq_context
   double da[MAX_N_PAR + 1];
 };
 
+#ifndef PS_DRIVER_API
 extern __device__ double *CUDA_Dg;
 
 __device__ extern freq_context *CUDA_CC;
+#endif
 
 /*
 struct freq_result
@@ -122,9 +128,18 @@ struct freq_result
 
 //__device__ extern freq_result *CUDA_FR;
 //LFR
+#ifndef PS_DRIVER_API
 __managed__ extern int isReported[N_BLOCKS];
 __managed__ extern double dark_best[N_BLOCKS];
 __managed__ extern double per_best[N_BLOCKS];
 __managed__ extern double dev_best[N_BLOCKS];
 __managed__ extern double la_best[N_BLOCKS];
 __managed__ extern double be_best[N_BLOCKS];
+#else
+/* driver-API build: the __managed__ module variables are reached through
+   host pointers resolved once from the fatbin (cuModuleGetGlobal returns a
+   host-dereferenceable pointer for managed variables); same names keep the
+   indexing code identical. Defined/initialized in cuda_iface.h. */
+extern int    *isReported;
+extern double *dark_best, *per_best, *dev_best, *la_best, *be_best;
+#endif
