@@ -26,3 +26,5 @@ hip/*.prehip
 hip/period_search_BOINC_rocm_claude
 hip/period_search_BOINC_rocm_claude.0.*
 hip/*.hipv4-amdgcn*
+hip/modbuild/
+hip/build_win_hip/

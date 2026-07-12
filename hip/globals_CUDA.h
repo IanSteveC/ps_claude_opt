@@ -1,12 +1,14 @@
+#ifndef PS_HIP_WIN
 #include "hip/hip_runtime.h"
+#endif
 #pragma once
 
-#ifndef PS_DRIVER_API
+#ifndef PS_HIP_WIN
 #include <hip/hip_runtime_api.h>
 #endif
 
 //  NOTE Fake declaration to satisfy intellisense. See https://stackoverflow.com/questions/39980645/enable-code-indexing-of-cuda-in-clion/39990500
-#if !defined(__HIPCC__) && !defined(PS_DRIVER_API)
+#if !defined(__HIPCC__) && !defined(PS_HIP_WIN)
 //#define __host__
 //#define __device__
 //#define __shared__
@@ -58,7 +60,7 @@ __device__ __device_builtin__ double __hiloint2double(int hi, int lo);
 #define N_BLOCKS 4096
 
 
-#ifndef PS_DRIVER_API
+#ifndef PS_HIP_MODULE
 //global to all freq
 __constant__ extern int CUDA_Ncoef, CUDA_Numfac, CUDA_Numfac1, CUDA_Dg_block;
 __constant__ extern int CUDA_ma, CUDA_mfit, /*CUDA_mfit1,*/ CUDA_lastone, CUDA_lastma, CUDA_ncoef0;
@@ -92,7 +94,7 @@ __device__ extern double CUDA_sigr2[MAX_N_OBS+1]; // (1/CUDA_sig^2) /*[MAX_N_OBS
 __device__ extern double CUDA_Weight[MAX_N_OBS+1];
 __device__ extern double CUDA_ee[3][MAX_N_OBS+1];
 __device__ extern double CUDA_ee0[3][MAX_N_OBS+1];
-#endif /* !PS_DRIVER_API */
+#endif /* !PS_HIP_MODULE */
 
 
 // dytemp is transposed since the 2026 rewrite: row = data point, column = parameter,
@@ -113,7 +115,7 @@ struct freq_context
   double da[MAX_N_PAR + 1];
 };
 
-#ifndef PS_DRIVER_API
+#ifndef PS_HIP_MODULE
 extern __device__ double *CUDA_Dg;
 
 __device__ extern freq_context *CUDA_CC;
@@ -129,7 +131,7 @@ struct freq_result
 
 //__device__ extern freq_result *CUDA_FR;
 //LFR
-#ifndef PS_DRIVER_API
+#ifndef PS_HIP_MODULE
 __managed__ extern int isReported[N_BLOCKS];
 __managed__ extern double dark_best[N_BLOCKS];
 __managed__ extern double per_best[N_BLOCKS];

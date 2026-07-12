@@ -16,7 +16,114 @@
  */
 #pragma once
 
-#if defined(__HIP_PLATFORM_AMD__) && !defined(PS_DRIVER_API)
+#if defined(PS_HIP_MODULE)
+/* ------------------------------------------------------------------ */
+/* Backend 4: HIP module API. The host never compiles device code; the        */
+/* kernels live in a separate multi-arch code object (hipcc --genco), and      */
+/* launch by name (hipModuleLaunchKernel) / symbols resolve by name            */
+/* (hipModuleGetGlobal). Used by BOTH the Linux validation harness (native     */
+/* gcc + libamdhip64.so, real hip headers) and the MinGW Windows cross-build   */
+/* (PS_HIP_WIN: hand-declared shim + dynamically-loaded amdhip64.dll). The      */
+/* rest of the hip* runtime API is called directly - amdhip64 exports it.      */
+/* ------------------------------------------------------------------ */
+
+#if defined(PS_HIP_WIN)
+#include "hip_win_shim.h"          /* hand-declared HIP API - no ROCm headers */
+#else
+#include <hip/hip_runtime.h>       /* Linux validation: real headers          */
+#endif
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <cstdint>
+
+extern "C" const unsigned char ps_hip_co[];   /* bin2c-embedded code object */
+
+/* host views of the __managed__ result arrays (declared extern in
+   globals_CUDA.h under PS_HIP_MODULE; resolved from the module below) */
+inline int    *isReported = nullptr;
+inline double *dark_best = nullptr, *per_best = nullptr, *dev_best = nullptr,
+              *la_best = nullptr, *be_best = nullptr;
+
+inline hipModule_t ps_module = nullptr;
+
+inline void ps_check(hipError_t r, const char* what)
+{
+    if (r != hipSuccess) {
+        fprintf(stderr, "HIP module error %d (%s) in %s\n", (int)r, hipGetErrorString(r), what);
+        exit(902);
+    }
+}
+
+inline void ps_load_module_once(void)
+{
+    if (ps_module) return;
+    ps_check(hipModuleLoadData(&ps_module, ps_hip_co), "hipModuleLoadData");
+    hipDeviceptr_t p; size_t b;
+    #define PS_MANAGED(var) \
+        ps_check(hipModuleGetGlobal(&p, &b, ps_module, #var), "managed " #var); \
+        var = (decltype(var))(uintptr_t)p;
+    PS_MANAGED(isReported) PS_MANAGED(dark_best) PS_MANAGED(per_best)
+    PS_MANAGED(dev_best)   PS_MANAGED(la_best)   PS_MANAGED(be_best)
+    #undef PS_MANAGED
+}
+
+inline hipFunction_t ps_func(const char* name)
+{
+    struct Ent { const char* n; hipFunction_t f; };
+    static Ent cache[80]; static int nc = 0;
+    for (int i = 0; i < nc; i++) if (!strcmp(cache[i].n, name)) return cache[i].f;
+    ps_load_module_once();
+    hipFunction_t f;
+    ps_check(hipModuleGetFunction(&f, ps_module, name), name);
+    if (nc < 80) { cache[nc].n = name; cache[nc].f = f; nc++; }
+    return f;
+}
+
+inline hipDeviceptr_t ps_sym(const char* name)
+{
+    struct Ent { const char* n; hipDeviceptr_t p; };
+    static Ent cache[80]; static int nc = 0;
+    for (int i = 0; i < nc; i++) if (!strcmp(cache[i].n, name)) return cache[i].p;
+    ps_load_module_once();
+    hipDeviceptr_t p; size_t b = 0;
+    ps_check(hipModuleGetGlobal(&p, &b, ps_module, name), name);
+    if (nc < 80) { cache[nc].n = name; cache[nc].p = p; nc++; }
+    return p;
+}
+
+/* dim3 for the launch config. On Linux the real hip header already defines
+   dim3; on Windows the shim defines it. Either way it converts from int. */
+template <typename... Args>
+inline hipError_t ps_launch(const char* name, dim3 grid, dim3 block,
+                            size_t shmem, hipStream_t stream, Args... args)
+{
+    void* params[] = { (void*)&args..., nullptr };
+    return hipModuleLaunchKernel(ps_func(name), grid.x, grid.y, grid.z,
+                                 block.x, block.y, block.z,
+                                 (unsigned)shmem, stream, params, nullptr);
+}
+inline hipError_t ps_launch(const char* name, dim3 grid, dim3 block,
+                            size_t shmem, hipStream_t stream)
+{
+    return hipModuleLaunchKernel(ps_func(name), grid.x, grid.y, grid.z,
+                                 block.x, block.y, block.z,
+                                 (unsigned)shmem, stream, nullptr, nullptr);
+}
+
+#define PS_LAUNCH(kernel, grid, block, shmem, stream, ...) \
+    ps_launch(#kernel, grid, block, shmem, stream, ##__VA_ARGS__)
+
+#define PS_SYMCPY(sym, src, count) \
+    hipMemcpyHtoD(ps_sym(#sym), (void*)(src), count)
+
+#define PS_SYMCPY_ASYNC(sym, src, count, stream) \
+    hipMemcpyHtoDAsync(ps_sym(#sym), (void*)(src), count, stream)
+
+#define PS_SYMCPY_FROM_ASYNC(dst, sym, count, stream) \
+    hipMemcpyDtoHAsync((void*)(dst), ps_sym(#sym), count, stream)
+
+#elif defined(__HIP_PLATFORM_AMD__) && !defined(PS_DRIVER_API)
 /* ------------------------------------------------------------------ */
 /* Backend 3: HIP / ROCm (AMD). <<<>>> is native; symbol copies need the      */
 /* HIP_SYMBOL() wrapper. Same call sites as the CUDA build.                    */

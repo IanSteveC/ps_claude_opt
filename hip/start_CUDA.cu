@@ -44,7 +44,7 @@ using std::isnan;
 #include "start_CUDA.h"
 #include "declarations_CUDA.h"
 #include "boinc_api.h"
-#ifndef PS_DRIVER_API
+#if !defined(PS_HIP_MODULE)
 #include "Start.cuh"
 //#include "hip/hip_runtime.h"
 #include <hip/hip_runtime_api.h>
