@@ -1,9 +1,16 @@
+#ifndef PS_HIP_WIN
 #include "hip/hip_runtime.h"
+#endif
 //#ifndef NVML_NO_UNVERSIONED_FUNC_DEFS
 //#define NVML_NO_UNVERSIONED_FUNC_DEFS
 //#endif
 
 //#define NEWDYTEMP
+
+#if !defined(_WIN32)
+#include <time.h>
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -33,8 +40,10 @@ int msleep(long ms)
 }
 #endif
 
+#ifndef PS_HIP_WIN
 #include <hip/hip_runtime.h>
 #include "hip_compat.h"
+#endif
 #include <cstdio>
 #include <cmath>
 using std::isnan;
@@ -65,7 +74,9 @@ using std::isnan;
 #include <unistd.h>
 #endif
 #endif
+#ifndef PS_HIP_WIN
 #include "ComputeCapability.h"
+#endif
 
 #ifdef _WIN32
 /* mingw-w64: usleep comes from its <unistd.h>; the glibc sched_yield
@@ -133,7 +144,11 @@ bool SetCUDABlockingSync(const int device)
 {
   hipDevice_t  hcuDevice;
   hipCtx_t hcuContext;
-  
+
+#if defined(PS_HIP_WIN)
+  if (psHipLoadRuntime() != 0) return false;   /* resolve amdhip64 first */
+#endif
+
   hipError_t status = hipInit(0);
   if (status != hipSuccess)
     return false;
@@ -187,6 +202,32 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   */
   
   //determine gridDim
+#if defined(PS_HIP_WIN)
+  /* MinGW shim: no hipDeviceProp_t. Query the few fields we print via
+     hipDeviceGetAttribute / hipDeviceGetName / hipMemGetInfo instead. */
+  {
+    hipDevice_t hdev = 0; hipDeviceGet(&hdev, cudadev);
+    char devname[256]; devname[0] = 0; hipDeviceGetName(devname, sizeof(devname), hdev);
+    int mpc = 0, shBlk = 0, shSM = 0, ccMaj = 0, ccMin = 0;
+    hipDeviceGetAttribute(&mpc,   hipDeviceAttributeMultiprocessorCount, cudadev);
+    hipDeviceGetAttribute(&shBlk, hipDeviceAttributeMaxSharedMemoryPerBlock, cudadev);
+    hipDeviceGetAttribute(&shSM,  hipDeviceAttributeMaxSharedMemoryPerMultiprocessor, cudadev);
+    hipDeviceGetAttribute(&ccMaj, hipDeviceAttributeComputeCapabilityMajor, cudadev);
+    hipDeviceGetAttribute(&ccMin, hipDeviceAttributeComputeCapabilityMinor, cudadev);
+    size_t freeB = 0, totB = 0; hipMemGetInfo(&freeB, &totB);
+    g_smCount = mpc;
+    if(!checkex)
+      {
+        fprintf(stderr, "Compute units (CUs) per task: %d\n\n", mpc);
+        fprintf(stderr, "HIP version: %d\n", CUDA_VERSION);
+        fprintf(stderr, "HIP Device number: %d\n", cudadev);
+        fprintf(stderr, "HIP Device: %s %luMB\n", devname, (unsigned long)(totB / 1048576));
+        fprintf(stderr, "GFX: cc %d.%d\n", ccMaj, ccMin);
+        fprintf(stderr, "Shared memory per Block | per SM: %d | %d\n", shBlk, shSM);
+      }
+  }
+  CUDA_grid_dim = N_BLOCKS;
+#else
   hipDeviceProp_t deviceProp;
 
   hipGetDeviceProperties(&deviceProp, cudadev);
@@ -242,6 +283,7 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
 
   CUDA_grid_dim = N_BLOCKS; //3072; //N_BLOCKS; //Nfactor * deviceProp.multiProcessorCount * smxBlock;
   g_smCount = deviceProp.multiProcessorCount;
+#endif /* !PS_HIP_WIN */
 
   if(!checkex)
     {
@@ -295,7 +337,7 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   hipEventCreateWithFlags(&event2, hipEventBlockingSync|hipEventDisableTiming);
 
   //printf("1 theEnd %p\n", theEnd);
-  hipHostMalloc(&theEnd, sizeof(int));
+  hipHostMalloc(&theEnd, sizeof(int), 0);  /* explicit flags: portable to the win shim pointer */
   //printf("2 theEnd %p\n", theEnd);
 
   if(res == hipSuccess)
@@ -545,7 +587,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	      hipEventRecord(event1, stream3);
 	      hipStreamQuery(stream3);
 
-	      hipStreamWaitEvent(stream3, event1);
+	      hipStreamWaitEvent(stream3, event1, 0);
 	      PS_SYMCPY_FROM_ASYNC(theEnd, CUDA_End, sizeof(int), stream3);
 	      //hipStreamQuery(stream3);
 
@@ -958,7 +1000,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	      //hipStreamQuery(stream1);
 	      //usleep(1);
 	      
-	      hipStreamWaitEvent(stream2, event1);
+	      hipStreamWaitEvent(stream2, event1, 0);
 	      PS_SYMCPY_FROM_ASYNC(theEnd, CUDA_End, sizeof(int), stream2);
 	      copyReady = false;
 	      hipStreamAddCallback(stream2, cbCopyReady, (void *)&copyReady, 0);

@@ -1,4 +1,6 @@
+#ifndef PS_HIP_WIN
 #include "hip/hip_runtime.h"
+#endif
 #pragma once
 
 #define BLOCKX4 4
