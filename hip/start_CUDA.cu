@@ -163,7 +163,7 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   auto initResult = SetCUDABlockingSync(cudadev);
   if (!initResult)
     {
-      fprintf(stderr, "CUDA: Error while initialising CUDA\n");
+      fprintf(stderr, "HIP: Error while initialising HIP\n");
       exit(999);
     }
 
@@ -213,12 +213,15 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
 	hipDeviceGetAttribute(&peakClk, hipDeviceAttributeClockRate, cudadev);
 	auto devicePeakClock = peakClk / 1024;*/
 
-      fprintf(stderr, "Multiprocessors per task under cuda-mps: %d\n\n", deviceProp.multiProcessorCount);
-      fprintf(stderr, "CUDA version: %d\n", cudaVersion);
-      fprintf(stderr, "CUDA Device number: %d\n", cudadev);
-      fprintf(stderr, "CUDA Device: %s %luMB\n", deviceProp.name, totalGlobalMemory);
-      //      fprintf(stderr, "CUDA Device driver: %s\n", drv_version_str);
-      fprintf(stderr, "Compute capability: %d.%d\n", deviceProp.major, deviceProp.minor);
+      fprintf(stderr, "Compute units (CUs) per task: %d\n\n", deviceProp.multiProcessorCount);
+      fprintf(stderr, "HIP version: %d\n", cudaVersion);
+      fprintf(stderr, "HIP Device number: %d\n", cudadev);
+      fprintf(stderr, "HIP Device: %s %luMB\n", deviceProp.name, totalGlobalMemory);
+      //      fprintf(stderr, "HIP Device driver: %s\n", drv_version_str);
+      char gfxname[64];
+      snprintf(gfxname, sizeof(gfxname), "%s", deviceProp.gcnArchName);
+      for(char* p = gfxname; *p; p++) if(*p == ':') { *p = '\0'; break; }  /* drop :sramecc+:xnack- feature suffix */
+      fprintf(stderr, "GFX: %s\n", gfxname);
       //fprintf(stderr, "Device peak clock: %d MHz\n", devicePeakClock);
       fprintf(stderr, "Shared memory per Block | per SM: %lu | %lu\n", sharedMemoryBlock, sharedMemorySm);
     }
@@ -493,7 +496,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
   err = hipMalloc(&pytemp, (size_t)CUDA_Grid_dim_precalc * (max_lp + 1) * sizeof(double));
   if(err != hipSuccess || pco == NULL || pdytemp == NULL || pytemp == NULL)
     {
-      fprintf(stderr, "CUDA: precalc scratch allocation failed (%s)\n", hipGetErrorString(err));
+      fprintf(stderr, "HIP: precalc scratch allocation failed (%s)\n", hipGetErrorString(err));
       exit(4);
     }
 
@@ -771,7 +774,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
       CUDA_grid_dim = N_BLOCKS;
       batch_freqs = N_BLOCKS / N_POLES;
     }
-  fprintf(stderr, "Cuda grid dim %d (%d freqs x %d poles per batch), N_BLOCKS %d, free mem %zuMB\n",
+  fprintf(stderr, "HIP grid dim %d (%d freqs x %d poles per batch), N_BLOCKS %d, free mem %zuMB\n",
 	  CUDA_grid_dim, batch_freqs, N_POLES, N_BLOCKS, freeB / 1048576);
   int n_iter_max, LinesWritten;
   double iter_diff_max;
@@ -1156,7 +1159,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
     } /* period loop */
 	
   boinc_fraction_done(0.99992);
-  printf("cuda DONE\n"); fflush(stdout);
+  printf("HIP DONE\n"); fflush(stdout);
 	
   hipFree(pco);
   hipFree(pdytemp);
