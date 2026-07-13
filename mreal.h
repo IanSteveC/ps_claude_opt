@@ -49,6 +49,7 @@ static inline double ps_real_from_double(double x) { return x; }
 
 #else /* PS_FP32 */
 
+
 /* ------------------------------------------------------------------ */
 /* FP32 build: double-float emulation                                  */
 /* ------------------------------------------------------------------ */
@@ -247,6 +248,28 @@ struct mreal4 { mreal x, y, z, w; };
 
 #define DF64_D __device__ __forceinline__
 
+/* DF64_MATH: force-inline by default (DF64_D). Building with
+   -DPS_FP32_NOINLINE_MATH instead marks the big transcendentals
+   (sincos/exp/exp2/acos) as real out-of-line device functions: shrinks the
+   binary a lot (those are the largest inline blobs) at the cost of call
+   overhead + a per-call optimization barrier. Whether that is a net perf win
+   or loss is hardware-specific (it can lower register pressure and help
+   occupancy, or cost latency) -- measure per target. The hot arithmetic
+   operators stay inlined regardless. */
+#if defined(PS_FP32_NOINLINE_MATH)
+  /* `inline` keeps ODR/linkage header-safe (defined in every TU that includes
+     mreal.h, merged by the linker); the noinline attribute is orthogonal and
+     forces out-of-line codegen so the body is emitted once, not inlined at
+     each call site. */
+  #if defined(__HIPCC__)
+  #define DF64_MATH __device__ inline __attribute__((noinline))
+  #else
+  #define DF64_MATH __device__ inline __noinline__
+  #endif
+#else
+#define DF64_MATH DF64_D
+#endif
+
 /* reciprocal: fast seed + one full-precision Newton step in df64.
    e = 1 - b*r0 is computed exactly enough because b*r0 ~= 1 (two_prod). */
 DF64_D df64 __drcp_rn(df64 b)
@@ -320,7 +343,7 @@ DF64_D df64 df64_cos_taylor(df64 u)
   return df64(1.0f) + x2 * p;
 }
 
-DF64_D void sincos(df64 x, df64 *s, df64 *c)
+DF64_MATH void sincos(df64 x, df64 *s, df64 *c)
 {
   if(!isfinite(x.hi))   /* (int) of nan/inf is UB; propagate nan */
     {
@@ -390,7 +413,7 @@ DF64_D df64 df64_ldexp(df64 a, int k)
   return df64(ldexpf(a.hi, k), ldexpf(a.lo, k));
 }
 
-DF64_D df64 exp(df64 x)
+DF64_MATH df64 exp(df64 x)
 {
   if(isnan(x.hi)) return x;
   /* clamp far above any legitimate value in this app (exp of fitted
@@ -415,7 +438,7 @@ DF64_D df64 exp(df64 x)
   return df64_ldexp(df64_exp_taylor(r), k);
 }
 
-DF64_D df64 exp2(df64 x)
+DF64_MATH df64 exp2(df64 x)
 {
   if(isnan(x.hi)) return x;
   if(x.hi >  36.0f) return df64(6.9e10f);  /* see exp() clamp comment */
@@ -427,19 +450,47 @@ DF64_D df64 exp2(df64 x)
   return df64_ldexp(df64_exp_taylor(rl), k);
 }
 
-/* ---- acos: float seed + one Newton step on cos(y) = x in df64 ----
-   Callers clamp x to [-1,1] already (solar-phase dot product). */
-DF64_D df64 acos(df64 x)
+/* ---- acos ----
+   General range (|x| < ~0.9999): float seed + one Newton step on cos(y)=x.
+   Near the endpoints the old code returned the raw acosf(x.hi), which is a
+   DISASTER exactly where this app needs it: the solar-phase dot product
+   x = ee.ee0 reaches 1 - 9e-8 at opposition, but 9e-8 is below float epsilon
+   (1.2e-7), so x.hi rounds to 1.0f and acosf(1.0f) returns 0 -- the true
+   value is sqrt(2*9e-8) ~ 4.2e-4, so acos was being zeroed out on opposition
+   points. The Newton step can't rescue it either: it divides by sin(y) ~ 0.
+   Fix: use the exact identity acos(x) = 2*asin(sqrt((1-x)/2)). 1-x is computed
+   in df64 (exact by cancellation when x ~ 1, so the full 9e-8 survives), the
+   sqrt argument is small, and an asin Taylor series to t^9 holds df64
+   precision (|t| <= 7.1e-3 => t^8 relative ~ 2^-53). */
+DF64_MATH df64 df64_asin_small(df64 t)   /* |t| <= ~7.1e-3 */
 {
-  float xs = x.hi;
-  if(xs >  1.0f) xs =  1.0f;
-  if(xs < -1.0f) xs = -1.0f;
-  float y0 = acosf(xs);
+  df64 t2 = t * t;
+  /* single-double coefficients: the double-double tails are below df64's
+     ~48-bit floor, so the nearest double is already exact for df64. */
+  df64 p = df64(0.030381944444444444);   /* 35/1152 */
+  p = p * t2 + df64(0.044642857142857144); /* 5/112 */
+  p = p * t2 + df64(0.075);              /* 3/40 */
+  p = p * t2 + df64(0.16666666666666666); /* 1/6 */
+  return t + t * (t2 * p);
+}
+
+DF64_MATH df64 acos(df64 x)
+{
+  if(!(x < df64(1.0f)))  return df64(0.0f);
+  if(!(x > df64(-1.0f))) return df64(3.141592653589793);
+  if(x.hi > 0.9999f)
+    {
+      df64 t = __dsqrt_rn((df64(1.0f) - x) * df64(0.5));
+      return df64(2.0f) * df64_asin_small(t);
+    }
+  if(x.hi < -0.9999f)
+    {
+      df64 t = __dsqrt_rn((df64(1.0f) + x) * df64(0.5));
+      return df64(3.141592653589793) - df64(2.0f) * df64_asin_small(t);
+    }
+  float y0 = acosf(x.hi);
   df64 s, c;
   sincos(df64(y0), &s, &c);
-  /* near x = +-1, sin(y) ~ 0: acosf's absolute error there is already
-     far below anything this app can sense; skip the correction */
-  if(fabsf(s.hi) < 1e-6f) return df64(y0);
   df64 y = df64(y0) + (c - x) / s;
   return y;
 }

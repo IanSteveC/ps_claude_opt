@@ -41,7 +41,7 @@ else
 fi
 
 INC="-I. -I.. -I$BOINC_DIR -I$BOINC_DIR/api -I$BOINC_DIR/lib"
-HIPFLAGS="-O3 -std=c++17 -fgpu-rdc $FPCONTRACT $PS_DEFS $OFF $INC"
+HIPFLAGS="-O3 -std=c++17 -fgpu-rdc $FPCONTRACT $PS_DEFS ${PS_EXTRA_DEFS:-} $OFF $INC"
 
 echo "[hip] device+host TUs for: $ARCHS"
 for tu in Start start_CUDA ComputeCapability; do
