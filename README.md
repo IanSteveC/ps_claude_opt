@@ -78,6 +78,34 @@ emulated ops or the LM reject-wild-steps recovery breaks (details in
 same kernel) that the FP64 build survives only by compiler luck — fixed
 here for both builds.
 
+### HIP/ROCm FP32 build (`hip/`, `FP32=1 ./build_hip.sh`)
+
+The same df64 emulation is ported to the HIP tree (`mreal.h` is shared by both
+trees; `hip/` keeps its own copies of the kernels per the CUDA/HIP isolation).
+Produces `period_search_BOINC_hip_claude_fp32`. Correctness on gfx1030 is
+identical to the CUDA FP32 build (same df64 code): 0 validator violations,
+max |dP| 1.4e-5 / |dRMS| 4.9e-4 / |dchi2| 0.34 over the 10-input suite — the
+same envelope as the FP64 build. Device code object: zero `v_*_f64`
+instructions.
+
+**Build flag that matters:** the FP32 HIP build uses `-ffp-contract=on`, NOT
+the default `-ffp-contract=fast`. Under `=fast`, clang contracts `two_prod`'s
+`a*b` into the following `fmaf(a,b,-p)` *across statements* and folds the error
+term to zero — verified on gfx1030 to collapse multiply accuracy from 2^-46 to
+2^-24 and wreck sincos/exp2/acos. `=on` only contracts within a single source
+expression, so `two_prod` survives while every other multiply-add still fuses.
+
+**Performance finding (the payoff test):** on a Radeon RX 6800 XT (gfx1030,
+~1:16 FP64) the FP32 build is **~1.94× *slower*** than the FP64 HIP build
+(mean 112.1 s vs 57.6 s over the suite). At a 1:16 FP64 ratio the emulation
+does not pay off: each FP64 op becomes ~10-25 FP32 ops, which exceeds the 16×
+FP64 penalty, and much of the kernel is memory/latency-bound rather than
+FP64-arithmetic-bound. The emulation is therefore worthwhile only where FP64
+is **absent** (Apple Silicon, Intel Arc — the FP32 build is the only way to
+run at all) or **far more throttled than 1:16** (1:32-1:64 consumer GeForce and
+Jetson). 1:16 is not deep enough; a 1:32+ part is needed to break even, and
+that remains unverified for lack of such hardware here.
+
 ## Building
 
 Linux x86_64: needs CUDA 12.9 at `/usr/local/cuda-12.9`, BOINC sources/libs at
