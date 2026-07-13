@@ -43,6 +43,41 @@ See [OPTIMIZATION_NOTES.md](OPTIMIZATION_NOTES.md) for the full engineering
 log: profiling evidence, per-phase results, measured dead-ends, the
 adversarial review findings, and the Blackwell diagnosis.
 
+## FP32-only build (this branch)
+
+`make FP32=1` builds `period_search_BOINC_cuda12000_fp32`, in which **every
+FP64 operation in device code is emulated with paired FP32 operations**
+(double-float / "df64": Dekker/Knuth error-free transformations, ~46-48-bit
+effective mantissa, see `mreal.h`). The host still computes in double and
+converts at the copy/launch/readback boundary; `df64` and `double` are both
+8 bytes, so all layouts are unchanged. `cuobjdump -sass` of the result
+contains **zero FP64 instructions** — the build targets GPUs with no or
+heavily throttled FP64 (Apple Silicon-class devices via future ports,
+Intel Arc, 1:32-1:64 GeForce/Jetson).
+
+Validated on the 10-input `input_gt_2000_test` suite against the CPU (`fma`)
+reference: 0 validator violations (0.1/0.1/0.5 on period/rms/chi2);
+max |dP| 1.4e-5, |dRMS| 4.9e-4, |dchi2| 0.34 across 4531 output lines —
+the same divergence envelope as the FP64 GPU build (1.6e-5 / 4.7e-4 / 0.32);
+mean rms within 2.2e-6 of reference with balanced per-line better/worse
+counts (1497/1570 vs FP64's 1599/1527). The FP64 build (`make`) is
+unaffected: mreal == double and outputs are bit-identical.
+
+On FP64-rich hardware the emulation is a pessimization by design: ~9-10x
+slower than the FP64 build on V100 (1:2 FP64). Each emulated op costs
+~10-25 FP32 ops, so on 1:64-FP64 consumer parts the same arithmetic maps to
+roughly 2.5-6x fewer issue slots than native FP64 — the build exists for
+exactly those devices (unverified on real 1:64 hardware so far).
+
+Notes for porters: the df64 `two_prod` must use `__fmul_rn` (nvcc's default
+FMA contraction otherwise folds the error term to zero); the FP32 build must
+not use `--use_fast_math`; inf/NaN must propagate IEEE-style through the
+emulated ops or the LM reject-wild-steps recovery breaks (details in
+`mreal.h` comments). The port also surfaced a latent upstream race in the
+`Flags[]` helpers (`__ldg` read-modify-write of a location written in the
+same kernel) that the FP64 build survives only by compiler luck — fixed
+here for both builds.
+
 ## Building
 
 Linux x86_64: needs CUDA 12.9 at `/usr/local/cuda-12.9`, BOINC sources/libs at
