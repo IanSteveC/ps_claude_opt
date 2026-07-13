@@ -22,9 +22,26 @@ mkdir -p "$OBJ"
 ARCHS="${ARCHS:-gfx906 gfx908 gfx90a gfx1010 gfx1012 gfx1030 gfx1031 gfx1032 gfx1034 gfx1035 gfx1100 gfx1101 gfx1102 gfx1103 gfx1200 gfx1201}"
 OFF=""; for a in $ARCHS; do OFF="$OFF --offload-arch=$a"; done
 
+# FP32=1 builds the FP32-only (df64) experiment: every double in device code
+# becomes a two-float emulated real (../mreal.h, shared with the CUDA build).
+# CRITICAL: the df64 error-free transforms (two_prod: p=a*b; err=fmaf(a,b,-p))
+# require -ffp-contract=on, NOT fast. Under =fast, clang contracts the a*b into
+# the fmaf across statements and folds the error term to zero -- verified on
+# gfx1030 to collapse mul accuracy from 2^-46 to 2^-24 (and wreck sincos/exp2).
+# =on only contracts within a single source expression, so two_prod survives
+# while every other multiply-add still fuses.
+if [ -n "$FP32" ]; then
+  PS_DEFS="-DPS_FP32"
+  FPCONTRACT="-ffp-contract=on"
+  APP="period_search_BOINC_hip_claude_fp32"
+else
+  PS_DEFS=""
+  FPCONTRACT="-ffp-contract=fast"
+  APP="period_search_BOINC_rocm_claude"
+fi
+
 INC="-I. -I.. -I$BOINC_DIR -I$BOINC_DIR/api -I$BOINC_DIR/lib"
-HIPFLAGS="-O3 -std=c++17 -fgpu-rdc -ffp-contract=fast $OFF $INC"
-APP="period_search_BOINC_rocm_claude"
+HIPFLAGS="-O3 -std=c++17 -fgpu-rdc $FPCONTRACT $PS_DEFS $OFF $INC"
 
 echo "[hip] device+host TUs for: $ARCHS"
 for tu in Start start_CUDA ComputeCapability; do

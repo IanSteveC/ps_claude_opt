@@ -42,7 +42,7 @@ extern "C" const unsigned char ps_hip_co[];   /* bin2c-embedded code object */
 /* host views of the __managed__ result arrays (declared extern in
    globals_CUDA.h under PS_HIP_MODULE; resolved from the module below) */
 inline int    *isReported = nullptr;
-inline double *dark_best = nullptr, *per_best = nullptr, *dev_best = nullptr,
+inline mreal  *dark_best = nullptr, *per_best = nullptr, *dev_best = nullptr,
               *la_best = nullptr, *be_best = nullptr;
 
 inline hipModule_t ps_module = nullptr;
@@ -215,7 +215,7 @@ inline int ps_device_ordinal = 0;
 /* host views of the __managed__ result arrays in the module (same names as
    the Linux build's host shadows; declared extern in globals_CUDA.h) */
 inline int    *isReported = nullptr;
-inline double *dark_best = nullptr, *per_best = nullptr, *dev_best = nullptr,
+inline mreal  *dark_best = nullptr, *per_best = nullptr, *dev_best = nullptr,
               *la_best = nullptr, *be_best = nullptr;
 
 inline void ps_check(CUresult r, const char* what)

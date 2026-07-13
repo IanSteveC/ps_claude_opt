@@ -35,7 +35,7 @@
 /* ------------------------------------------------------------------ */
 typedef double mreal;
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 typedef double4 mreal4;
 #endif
 
@@ -55,7 +55,7 @@ static inline double ps_real_from_double(double x) { return x; }
 
 #include <math.h>
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #define DF64_FD __host__ __device__ __forceinline__
 #else
 #define DF64_FD inline
@@ -90,7 +90,7 @@ struct df64
 /* ---- error-free transformations (all pure FP32) ---- */
 DF64_FD float df64_fmaf(float a, float b, float c)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
   return __fmaf_rn(a, b, c);
 #else
   return fmaf(a, b, c);
@@ -120,7 +120,7 @@ DF64_FD float quick_two_sum(float a, float b, float &err)
    destroying the transformation (observed on CUDA 12.9 / sm_70). */
 DF64_FD float df64_fmul(float a, float b)
 {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
   return __fmul_rn(a, b);
 #else
   return a * b;
@@ -236,14 +236,14 @@ typedef df64 mreal;
 static inline double ps_real_to_double(df64 x) { return (double)x.hi + (double)x.lo; }
 static inline df64 ps_real_from_double(double d) { return df64(d); }
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 
 struct mreal4 { mreal x, y, z, w; };
 
 /* ================================================================== */
 /* device-only: math functions and intrinsic overloads                 */
 /* ================================================================== */
-#if defined(__CUDA_ARCH__) || defined(__CUDACC__)
+#if defined(__CUDA_ARCH__) || defined(__CUDACC__) || defined(__HIPCC__)
 
 #define DF64_D __device__ __forceinline__
 
@@ -445,6 +445,9 @@ DF64_D df64 acos(df64 x)
 }
 
 /* ---- load/store/shuffle intrinsic overloads (df64 == float2 layout) ---- */
+#ifndef __HIP_PLATFORM_AMD__
+/* CUDA: the cache-hint load/store builtins are real functions; provide df64
+   overloads that move the pair as one float2 (128-bit vector) transaction. */
 DF64_D df64 __ldg(const df64 *p)
 {
   float2 v = __ldg((const float2 *)p);
@@ -491,8 +494,31 @@ DF64_D df64 __shfl_sync(unsigned mask, df64 v, int lane)
               __shfl_sync(mask, v.lo, lane));
 }
 
+#else /* __HIP_PLATFORM_AMD__ */
+/* HIP: hip_compat.h already redefined __ldg/__ldca/__stwb/... as the ps_ld/
+   ps_st templates (plain loads/stores) - those handle a df64 by value copy,
+   so no df64 load/store overload is needed. The shuffles, however, route
+   through hip_compat's ps_shfl_* templates which call __shfl_*(v, ..., 32);
+   AMD's __shfl_* have no df64 form. Provide non-template ps_shfl_* overloads
+   for df64 (a non-template is preferred over the template for df64 args) that
+   shuffle the two floats and keep the width pinned to 32 like the scalar
+   path. */
+DF64_D df64 ps_shfl_down(df64 v, unsigned d)
+{
+  return df64(__shfl_down(v.hi, d, PS_WARP), __shfl_down(v.lo, d, PS_WARP));
+}
+DF64_D df64 ps_shfl_xor(df64 v, int m)
+{
+  return df64(__shfl_xor(v.hi, m, PS_WARP), __shfl_xor(v.lo, m, PS_WARP));
+}
+DF64_D df64 ps_shfl(df64 v, int s)
+{
+  return df64(__shfl(v.hi, s, PS_WARP), __shfl(v.lo, s, PS_WARP));
+}
+#endif /* __HIP_PLATFORM_AMD__ */
+
 #endif /* device parts */
-#endif /* __CUDACC__ */
+#endif /* __CUDACC__ / __HIPCC__ */
 
 /* host-side conversion helper: convert a double array into a heap df64
    buffer for the SYMCPY shims (freed by the caller). Host-only code, but
@@ -506,26 +532,32 @@ static inline df64 *ps_real_convert_alloc(const double *src, size_t nelem)
   return buf;
 }
 
+/* portable spellings so the same shim serves the nvcc and hipcc host TUs */
+#if defined(__HIP_PLATFORM_AMD__)
+#define PS_REAL_ERR_T       hipError_t
+#define PS_REAL_STREAM_SYNC hipStreamSynchronize
+#else
+#define PS_REAL_ERR_T       cudaError_t
+#define PS_REAL_STREAM_SYNC cudaStreamSynchronize
+#endif
+
 /* symbol-copy shims: convert double -> df64 elementwise, then copy.
-   cudaMemcpyToSymbolAsync from pageable memory returns only after the
-   source has been staged, so freeing the temp immediately is safe. */
+   MemcpyToSymbolAsync from pageable memory returns only after the source has
+   been staged on CUDA, but NOT on HIP - so both shims synchronize the stream
+   before freeing the temp (a handful of copies per workunit; cost is nil). */
 #define PS_SYMCPY_REAL(sym, src, nelem)                                  \
     ([&]() {                                                             \
         df64 *ps__tmp = ps_real_convert_alloc((const double *)(src), (nelem)); \
-        cudaError_t ps__e = PS_SYMCPY(sym, ps__tmp, (nelem) * sizeof(df64)); \
+        PS_REAL_ERR_T ps__e = PS_SYMCPY(sym, ps__tmp, (nelem) * sizeof(df64)); \
         free(ps__tmp);                                                   \
         return ps__e;                                                    \
     }())
 
-/* NOTE: the temp buffer must outlive the async copy. Staging of pageable
-   memory is normally synchronous with respect to the source, but that is
-   an implementation detail; synchronize the stream before freeing (these
-   copies happen a handful of times per workunit, cost is irrelevant). */
 #define PS_SYMCPY_REAL_ASYNC(sym, src, nelem, stream)                    \
     ([&]() {                                                             \
         df64 *ps__tmp = ps_real_convert_alloc((const double *)(src), (nelem)); \
-        cudaError_t ps__e = PS_SYMCPY_ASYNC(sym, ps__tmp, (nelem) * sizeof(df64), stream); \
-        cudaStreamSynchronize(stream);                                   \
+        PS_REAL_ERR_T ps__e = PS_SYMCPY_ASYNC(sym, ps__tmp, (nelem) * sizeof(df64), stream); \
+        PS_REAL_STREAM_SYNC(stream);                                     \
         free(ps__tmp);                                                   \
         return ps__e;                                                    \
     }())
