@@ -114,10 +114,23 @@ DF64_FD float quick_two_sum(float a, float b, float &err)
   return s;
 }
 
+/* contraction-proof multiply: __fmul_rn is documented to never be merged
+   into an FMA. A plain `a * b` here lets nvcc (default -fmad=true) see
+   fmaf(a, b, -(a*b)) in two_prod and fold the error term to ZERO, silently
+   destroying the transformation (observed on CUDA 12.9 / sm_70). */
+DF64_FD float df64_fmul(float a, float b)
+{
+#if defined(__CUDA_ARCH__)
+  return __fmul_rn(a, b);
+#else
+  return a * b;
+#endif
+}
+
 /* p + err == a * b exactly (FMA form) */
 DF64_FD float two_prod(float a, float b, float &err)
 {
-  float p = a * b;
+  float p = df64_fmul(a, b);
   err = df64_fmaf(a, b, -p);
   return p;
 }
@@ -127,6 +140,9 @@ DF64_FD df64 operator+(df64 a, df64 b)
 {
   float s1, s2, t1, t2;
   s1 = two_sum(a.hi, b.hi, s2);
+  /* inf/nan: the error terms would evaluate inf-inf = NaN and poison the
+     pair; propagate the IEEE float result instead (as double would) */
+  if(!isfinite(s1)) return df64(s1, 0.0f);
   t1 = two_sum(a.lo, b.lo, t2);
   s2 += t1;
   s1 = quick_two_sum(s1, s2, s2);
@@ -149,6 +165,7 @@ DF64_FD df64 operator*(df64 a, df64 b)
 {
   float p1, p2;
   p1 = two_prod(a.hi, b.hi, p2);
+  if(!isfinite(p1)) return df64(p1, 0.0f);   /* inf/nan propagation */
   p2 = df64_fmaf(a.hi, b.lo, df64_fmaf(a.lo, b.hi, p2));
   p1 = quick_two_sum(p1, p2, p2);
   return df64(p1, p2);
@@ -158,6 +175,8 @@ DF64_FD df64 operator*(df64 a, df64 b)
 DF64_FD df64 operator/(df64 a, df64 b)
 {
   float q1 = a.hi / b.hi;
+  /* 0/x, x/0, inf and nan operands: keep the IEEE float quotient */
+  if(!isfinite(q1) || q1 == 0.0f) return df64(q1, 0.0f);
   df64 r = a - b * df64(q1);
   float q2 = (r.hi + r.lo) / b.hi;
   r = r - b * df64(q2);
@@ -232,10 +251,11 @@ struct mreal4 { mreal x, y, z, w; };
    e = 1 - b*r0 is computed exactly enough because b*r0 ~= 1 (two_prod). */
 DF64_D df64 __drcp_rn(df64 b)
 {
-  /* rcp(+-0) must give +-inf like the FP64 intrinsic (used as an
-     intentional sentinel); the Newton form would produce 0*inf = NaN */
-  if(b.hi == 0.0f && b.lo == 0.0f) return df64(__frcp_rn(b.hi), 0.0f);
   float r0 = __frcp_rn(b.hi);
+  /* rcp(+-0) = +-inf (used as an intentional sentinel), rcp(+-inf) = +-0,
+     rcp(nan) = nan - all match the FP64 intrinsic; the Newton step would
+     turn each of them into NaN via 0*inf */
+  if(!isfinite(r0) || r0 == 0.0f) return df64(r0, 0.0f);
   df64 e = df64(1.0f) - b * df64(r0);
   df64 r = df64(r0) + df64(r0) * e;
   return r;
@@ -244,8 +264,9 @@ DF64_D df64 __drcp_rn(df64 b)
 /* sqrt: fast seed + one Karp-Markstein style correction */
 DF64_D df64 __dsqrt_rn(df64 a)
 {
-  if(a.hi == 0.0f && a.lo == 0.0f) return df64(0.0f);
   float s0 = __fsqrt_rn(a.hi);
+  /* 0, inf, nan (incl. sqrt of negative): keep the IEEE float result */
+  if(!isfinite(s0) || s0 == 0.0f) return df64(s0, 0.0f);
   df64 d = a - df64(s0) * df64(s0);
   float corr = (d.hi + d.lo) * (0.5f * __frcp_rn(s0));
   float r1, r2;
@@ -301,6 +322,12 @@ DF64_D df64 df64_cos_taylor(df64 u)
 
 DF64_D void sincos(df64 x, df64 *s, df64 *c)
 {
+  if(!isfinite(x.hi))   /* (int) of nan/inf is UB; propagate nan */
+    {
+      df64 q = df64(x.hi - x.hi, 0.0f);
+      *s = q; *c = q;
+      return;
+    }
   /* k = round(x / (pi/2)) */
   df64 kk = round(x * df64(DF64_2_OVER_PI));
   int k = (int)kk.hi;
@@ -365,7 +392,13 @@ DF64_D df64 df64_ldexp(df64 a, int k)
 
 DF64_D df64 exp(df64 x)
 {
-  if(x.hi >  88.0f) return df64(3.0e38f);   /* huge finite, not inf */
+  if(isnan(x.hi)) return x;
+  /* clamp far above any legitimate value in this app (exp of fitted
+     log-coefficients, O(1)) but low enough that downstream products and
+     2000-point accumulations cannot overflow df64's float exponent range.
+     Oversized trial steps produce a huge-but-finite chisq and are rejected
+     by the LM loop exactly as in FP64. */
+  if(x.hi >  25.0f) return df64(7.2e10f);
   if(x.hi < -87.0f) return df64(0.0f);
   float kf = roundf(x.hi * 1.4426950408889634f);
   int k = (int)kf;
@@ -384,7 +417,8 @@ DF64_D df64 exp(df64 x)
 
 DF64_D df64 exp2(df64 x)
 {
-  if(x.hi >  127.0f) return df64(3.0e38f);
+  if(isnan(x.hi)) return x;
+  if(x.hi >  36.0f) return df64(6.9e10f);  /* see exp() clamp comment */
   if(x.hi < -125.0f) return df64(0.0f);
   float kf = roundf(x.hi);
   int k = (int)kf;
@@ -483,10 +517,15 @@ static inline df64 *ps_real_convert_alloc(const double *src, size_t nelem)
         return ps__e;                                                    \
     }())
 
+/* NOTE: the temp buffer must outlive the async copy. Staging of pageable
+   memory is normally synchronous with respect to the source, but that is
+   an implementation detail; synchronize the stream before freeing (these
+   copies happen a handful of times per workunit, cost is irrelevant). */
 #define PS_SYMCPY_REAL_ASYNC(sym, src, nelem, stream)                    \
     ([&]() {                                                             \
         df64 *ps__tmp = ps_real_convert_alloc((const double *)(src), (nelem)); \
         cudaError_t ps__e = PS_SYMCPY_ASYNC(sym, ps__tmp, (nelem) * sizeof(df64), stream); \
+        cudaStreamSynchronize(stream);                                   \
         free(ps__tmp);                                                   \
         return ps__e;                                                    \
     }())

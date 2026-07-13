@@ -28,38 +28,47 @@ __device__ uint    Flags[N_BLOCKS];
 #define isNiter   2U
 #define isAlambda 4U
 
+/* Flag helpers use PLAIN loads/stores: the original __stwb(__ldg|bit)
+   read-modify-write violates the __ldg contract (the location must be
+   read-only for the kernel's whole duration) in every kernel that both
+   reads and writes Flags (Iter1Begin sets isNiter then isAlambda: the
+   second RMW's __ldg can return a stale value and WIPE the first bit).
+   The FP64 build happened to survive by compiler store-forwarding; the
+   FP32 build's different scheduling exposed the race. Single writer per
+   idx, so plain (volatile) RMW is sufficient. */
 __device__ void __forceinline__ setFlag(uint i, int idx)
 {
-  uint *a = &Flags[idx]; 
-  __stwb(a, __ldg(a) | i); 
+  volatile uint *a = &Flags[idx];
+  *a = *a | i;
 }
 
 __device__ void __forceinline__ resetFlag(uint i, int idx)
 {
-  uint *a = &Flags[idx]; 
-  __stwb(a, __ldg(a) & ~i); 
+  volatile uint *a = &Flags[idx];
+  *a = *a & ~i;
 }
 
 __device__ void __forceinline__ clearFlag(int idx)
 {
-  __stwb(&Flags[idx], 0);
+  volatile uint *a = &Flags[idx];
+  *a = 0;
 }
 
 
 __device__ uint __forceinline__ getFlags(int idx)
 {
-  return __ldg(&Flags[idx]);
+  return *(volatile const uint *)&Flags[idx];
 }
 
 
 __device__ bool __forceinline__ isAllTrue(uint flags, int idx)
 {
-  return (__ldg(&Flags[idx]) & flags) == flags;
+  return (*(volatile const uint *)&Flags[idx] & flags) == flags;
 }
 
 __device__ bool __forceinline__ isAnyTrue(uint flags, int idx)
 {
-  return (__ldg(&Flags[idx]) & flags) != 0;
+  return (*(volatile const uint *)&Flags[idx] & flags) != 0;
 }
 
 
