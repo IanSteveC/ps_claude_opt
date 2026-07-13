@@ -16,6 +16,11 @@
  */
 #pragma once
 
+/* the driver-API/module host result-pointer shadows below are typed `mreal`
+   (== double, or df64 under PS_FP32). ComputeCapability.cu reaches this header
+   without globals_CUDA.h, so pull mreal.h in directly (pragma-once safe). */
+#include "mreal.h"
+
 #ifndef PS_DRIVER_API
 /* ------------------------------------------------------------------ */
 /* Backend 1: nvcc / CUDA runtime API (Linux release path, unchanged)  */

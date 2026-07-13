@@ -31,7 +31,20 @@ OFF=""; for a in $ARCHS; do OFF="$OFF --offload-arch=$a"; done
 
 CXX="$MINGW-g++"
 CC="$MINGW-gcc"
-APP="period_search_BOINC_hip_claude_win64.exe"
+
+# FP32=1 builds the FP32-only (df64) Windows HIP exe. The genco device pass
+# needs -DPS_FP32 and -ffp-contract=on (NOT fast: =fast folds two_prod's error
+# term to zero - see build_hip.sh); the MinGW host needs -DPS_FP32 for mreal.h's
+# boundary conversions.
+if [ -n "$FP32" ]; then
+  PS_DEFS="-DPS_FP32"
+  FPCONTRACT="-ffp-contract=on"
+  APP="period_search_BOINC_hip_claude_fp32_win64.exe"
+else
+  PS_DEFS=""
+  FPCONTRACT="-ffp-contract=fast"
+  APP="period_search_BOINC_hip_claude_win64.exe"
+fi
 
 INC="-I. -I.. -I$BOINC_DIR -I$BOINC_DIR/api -I$BOINC_DIR/lib -I$BOINC_DIR/win_build"
 
@@ -42,7 +55,7 @@ fi
 
 # 1. multi-arch code object (exact device ISA, host-OS neutral)
 echo "[genco] hipcc --genco (16 arches: $ARCHS)"
-"$HIPCC" --genco $OFF -O3 -std=c++17 -ffp-contract=fast \
+"$HIPCC" --genco $OFF -O3 -std=c++17 $FPCONTRACT $PS_DEFS \
   -I. -I.. -I"$BOINC_DIR" -I"$BOINC_DIR/api" -I"$BOINC_DIR/lib" \
   -o "$OBJ/ps_hip.co" Start.cu
 
@@ -51,7 +64,7 @@ echo "[bin2c] embedding $(stat -c%s "$OBJ/ps_hip.co") bytes"
 python3 modbuild/bin2c.py "$OBJ/ps_hip.co" ps_hip_co > "$OBJ/ps_hip_co.c"
 
 # 3. host objects (MinGW, plain C++, hand-declared HIP shim, no ROCm headers)
-CXXFLAGS="-O3 -m64 -std=gnu++17 -fpermissive -DPS_HIP_MODULE -DPS_HIP_WIN -DNDEBUG $INC"
+CXXFLAGS="-O3 -m64 -std=gnu++17 -fpermissive -DPS_HIP_MODULE -DPS_HIP_WIN $PS_DEFS -DNDEBUG $INC"
 echo "[cc] host objects (mingw)"
 $CXX $CXXFLAGS -x c++ -c start_CUDA.cu           -o "$OBJ/start_CUDA.o"
 $CXX $CXXFLAGS       -c hip_win_loader.cpp       -o "$OBJ/hip_win_loader.o"

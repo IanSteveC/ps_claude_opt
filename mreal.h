@@ -532,8 +532,14 @@ static inline df64 *ps_real_convert_alloc(const double *src, size_t nelem)
   return buf;
 }
 
-/* portable spellings so the same shim serves the nvcc and hipcc host TUs */
-#if defined(__HIP_PLATFORM_AMD__)
+/* portable spellings so the same shim serves every host TU:
+   - nvcc Linux / MinGW driver-API (PS_DRIVER_API): cudaError_t (cuda_iface.h
+     typedefs it to CUresult on the Windows path)
+   - hipcc Linux native: __HIP_PLATFORM_AMD__ -> hipError_t
+   - MinGW HIP module/win (PS_HIP_MODULE / PS_HIP_WIN): the hand-declared shim
+     provides hipError_t + hipStreamSynchronize but does NOT define
+     __HIP_PLATFORM_AMD__, so key off the HIP-module macros too. */
+#if defined(__HIP_PLATFORM_AMD__) || defined(PS_HIP_MODULE) || defined(PS_HIP_WIN)
 #define PS_REAL_ERR_T       hipError_t
 #define PS_REAL_STREAM_SYNC hipStreamSynchronize
 #else

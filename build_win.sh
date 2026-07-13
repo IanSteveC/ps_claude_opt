@@ -25,7 +25,20 @@ BOINC_DIR="${BOINC_DIR:-$HOME/builds/boinc}"
 MINGW="${MINGW:-x86_64-w64-mingw32}"
 AP27W="${AP27W:-$HOME/builds/primegrid/ap27/cuda/winlibs}"
 W=winlibs
-APP="period_search_BOINC_cuda1291_claude_win64.exe"
+
+# FP32=1 builds the FP32-only (df64) Windows exe: the device fatbin is built
+# FP32 via the Linux Makefile (same PS_FP32 device code the Linux CUDA app
+# runs), and the MinGW host is compiled with -DPS_FP32 so mreal.h's host-side
+# boundary conversions come in.
+if [ -n "$FP32" ]; then
+  PS_DEFS="-DPS_FP32"
+  MAKE_FP32="FP32=1"
+  APP="period_search_BOINC_cuda1291_claude_fp32_win64.exe"
+else
+  PS_DEFS=""
+  MAKE_FP32=""
+  APP="period_search_BOINC_cuda1291_claude_win64.exe"
+fi
 
 CXX="$MINGW-g++"
 CC="$MINGW-gcc"
@@ -62,7 +75,7 @@ fi
 #    zero SASS diff per arch). Building it via the Linux Makefile also removes
 #    any flag-drift risk between the two platforms.
 echo "[fatbin] building Linux device-link object and extracting its fatbin"
-make pscuda.device-link.o > /dev/null
+make BOINC_DIR="$BOINC_DIR" $MAKE_FP32 pscuda.device-link.o > /dev/null
 objcopy -O binary --only-section=.nv_fatbin pscuda.device-link.o Start_win.fatbin
 
 # 2. embed as a C array (COFF-safe)
@@ -71,7 +84,7 @@ echo "[bin2c] embedding fatbin"
 
 # 3. compile host objects (plain C++/C - no CUDA toolchain involved)
 BINC="-I$W/shim -I$BOINC_DIR -I$BOINC_DIR/api -I$BOINC_DIR/lib -I$BOINC_DIR/win_build"
-CXXFLAGS="-O3 -m64 -std=gnu++17 -DPS_DRIVER_API -DNDEBUG -I. -I$CUDA/include $BINC"
+CXXFLAGS="-O3 -m64 -std=gnu++17 -DPS_DRIVER_API $PS_DEFS -DNDEBUG -I. -I$CUDA/include $BINC"
 echo "[cc] host objects (mingw)"
 $CXX $CXXFLAGS -x c++ -c -o w_start_CUDA.o start_CUDA.cu
 $CXX $CXXFLAGS -x c++ -c -o w_ComputeCapability.o ComputeCapability.cu

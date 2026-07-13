@@ -673,11 +673,6 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	      precalcpct += 0.00001;
 	      if((loop & 3) == 3)
 		boinc_fraction_done(precalcpct > 0.02 ? 0.02 : precalcpct);
-	      {
-		cudaError_t e_dbg = cudaGetLastError();
-		if(e_dbg != cudaSuccess && loop < 24)
-		  { fprintf(stderr, "CUDAERR iter %d: %s\n", loop, cudaGetErrorString(e_dbg)); }
-	      }
 	      printf("\r precalc iter %3d | converged %4d/%4d  ", loop,
 		     end_count, CUDA_Grid_dim_precalc);
 	      fflush(stdout);

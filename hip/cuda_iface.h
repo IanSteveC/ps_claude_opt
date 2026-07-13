@@ -16,6 +16,11 @@
  */
 #pragma once
 
+/* the module/win host result-pointer shadows below are typed `mreal` (== double,
+   or df64 under PS_FP32). ComputeCapability.cu reaches this header without
+   globals_CUDA.h, so pull mreal.h in directly (pragma-once safe). */
+#include "mreal.h"
+
 #if defined(PS_HIP_MODULE)
 /* ------------------------------------------------------------------ */
 /* Backend 4: HIP module API. The host never compiles device code; the        */
