@@ -43,7 +43,25 @@ See [OPTIMIZATION_NOTES.md](OPTIMIZATION_NOTES.md) for the full engineering
 log: profiling evidence, per-phase results, measured dead-ends, the
 adversarial review findings, and the Blackwell diagnosis.
 
-## FP32-only build (this branch)
+## Build matrix (one codebase, all targets)
+
+A single source tree builds every platform/backend, and every one of them takes
+`FP32=1` to select the df64 emulation build:
+
+| target | command | `FP32=1` |
+|---|---|---|
+| Linux x64 CUDA | `make` | ✓ |
+| Linux aarch64 CUDA (Jetson) | `make -f Makefile_arm` | ✓ |
+| Windows x64 CUDA (MinGW cross) | `./build_win.sh` | ✓ |
+| Linux x64 HIP/ROCm | `hip/build_hip.sh` | ✓ |
+| Windows x64 HIP (MinGW cross) | `hip/build_win_hip.sh` | ✓ |
+
+CUDA and HIP keep separate source copies (root vs `hip/`) as before — only the
+stable pure-host-math `.c` routines and the FP32 abstraction `mreal.h` are
+shared. `mreal == double` with no `FP32=1`, so the default builds are byte-for-
+byte the prior FP64 app.
+
+## FP32-only build
 
 `make FP32=1` builds `period_search_BOINC_cuda12000_fp32`, in which **every
 FP64 operation in device code is emulated with paired FP32 operations**
