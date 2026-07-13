@@ -7,7 +7,26 @@ BOINC_LIB_DIR = $(BOINC_DIR)/lib
 
 CUDA_PATH = /usr/local/cuda-12.9
 
-CXXFLAGS = -g -O3 \
+# FP32=1 builds the FP32-only experiment: every double in device code becomes
+# a two-float ("double-float") emulated real (see mreal.h). Requirements:
+#  - no --use_fast_math (error-free transformations need IEEE FP32 ops;
+#    fast-math approximate div/sqrt would only weaken the Newton seeds, but
+#    FTZ/contraction inside two_sum/two_prod is not worth risking)
+#  - register cap lifted (df64 doubles register pressure; the per-kernel
+#    __launch_bounds__ still bound the hot kernels)
+ifdef FP32
+PS_DEFS = -DPS_FP32
+PS_MAXRREG = 128
+PS_FASTMATH =
+PS_SUFFIX = _fp32
+else
+PS_DEFS =
+PS_MAXRREG = 32
+PS_FASTMATH = --use_fast_math
+PS_SUFFIX =
+endif
+
+CXXFLAGS = -g -O3 $(PS_DEFS) \
 	-I$(BOINC_DIR) \
 	-I$(BOINC_LIB_DIR) \
 	-I$(BOINC_API_DIR) \
@@ -27,7 +46,7 @@ CXXFLAGS = -g -O3 \
 # CUDA 11.8 - CC:
 #VCCFLAGS = --forward-unknown-opts -mcmodel=medium --split-compile-extended 25 -O3 -lineinfo --use_fast_math --extra-device-vectorization --ptxas-options="-v -O3 --register-usage-level 0 " -t0 -O3 -gencode=arch=compute_86,code=sm_86 --generate-code arch=compute_50,code=sm_50 --generate-code arch=compute_52,code=sm_52 --generate-code arch=compute_53,code=sm_53 --generate-code arch=compute_60,code=sm_60 --generate-code arch=compute_61,code=sm_61 --generate-code arch=compute_62,code=sm_62 --generate-code arch=compute_70,code=sm_70 --generate-code arch=compute_72,code=sm_72 --generate-code arch=compute_75,code=sm_75 --generate-code arch=compute_80,code=sm_80 --generate-code arch=compute_87,code=sm_87 --generate-code arch=compute_89,code=sm_89 --maxrregcount=128 -rdc=true
 
-NVCCFLAGS = --forward-unknown-opts -mcmodel=medium --split-compile-extended 25 -O3 -lineinfo --use_fast_math --extra-device-vectorization --ptxas-options="-v -O3 --register-usage-level 0 " -t0 -O3 --generate-code arch=compute_50,code=[lto_50,sm_50] --generate-code arch=compute_52,code=[lto_52,sm_52] --generate-code arch=compute_60,code=[lto_60,sm_60] --generate-code arch=compute_61,code=[lto_61,sm_61] --generate-code arch=compute_70,code=[lto_70,sm_70] --generate-code arch=compute_75,code=[lto_75,sm_75] --generate-code arch=compute_80,code=[lto_80,sm_80] --generate-code arch=compute_86,code=[lto_86,sm_86] --generate-code arch=compute_89,code=[lto_89,sm_89] --generate-code arch=compute_90,code=[lto_90,sm_90] --generate-code arch=compute_100,code=[lto_100,sm_100] --generate-code arch=compute_89,code=sm_120 --maxrregcount=32 -rdc=true
+NVCCFLAGS = --forward-unknown-opts -mcmodel=medium --split-compile-extended 25 -O3 -lineinfo $(PS_FASTMATH) $(PS_DEFS) --extra-device-vectorization --ptxas-options="-v -O3 --register-usage-level 0 " -t0 -O3 --generate-code arch=compute_50,code=[lto_50,sm_50] --generate-code arch=compute_52,code=[lto_52,sm_52] --generate-code arch=compute_60,code=[lto_60,sm_60] --generate-code arch=compute_61,code=[lto_61,sm_61] --generate-code arch=compute_70,code=[lto_70,sm_70] --generate-code arch=compute_75,code=[lto_75,sm_75] --generate-code arch=compute_80,code=[lto_80,sm_80] --generate-code arch=compute_86,code=[lto_86,sm_86] --generate-code arch=compute_89,code=[lto_89,sm_89] --generate-code arch=compute_90,code=[lto_90,sm_90] --generate-code arch=compute_100,code=[lto_100,sm_100] --generate-code arch=compute_89,code=sm_120 --maxrregcount=$(PS_MAXRREG) -rdc=true
 
 CC=g++
 CXX=g++
@@ -41,7 +60,7 @@ MY_LIBS=trifac.o areanorm.o sphfunc.o ellfit.o ludcmp.o lubksb.o \
 		dot_product.o pscuda.device-link.o start_CUDA.o Start.o\
 		ComputeCapability.o
 
-PROGS = period_search_BOINC_cuda12000
+PROGS = period_search_BOINC_cuda12000$(PS_SUFFIX)
 
 all: $(PROGS)
 
@@ -76,7 +95,7 @@ install: period_search_BOINC_cuda12000
 # because otherwise you might get a version in /usr/lib etc.
 
 ## period_search_BOINC_cuda12000: period_search_BOINC.o $(MY_LIBS) libstdc++.a $(BOINC_API_DIR)/libboinc_api.a $(BOINC_LIB_DIR)/libboinc.a libcudart.so libcuda.so libnvidia-ml.so
-period_search_BOINC_cuda12000: period_search_BOINC.o $(MY_LIBS) libstdc++.a $(BOINC_API_DIR)/libboinc_api.a $(BOINC_LIB_DIR)/libboinc.a libcudart_static.a libcudadevrt.a 
+period_search_BOINC_cuda12000$(PS_SUFFIX): period_search_BOINC.o $(MY_LIBS) libstdc++.a $(BOINC_API_DIR)/libboinc_api.a $(BOINC_LIB_DIR)/libboinc.a libcudart_static.a libcudadevrt.a
 	$(CXX) $(CXXFLAGS) -o $@ $(MY_LIBS) $< libstdc++.a -pthread \
 	$(BOINC_API_DIR)/libboinc_api.a \
 	$(BOINC_LIB_DIR)/libboinc.a $(LDFLAGS) \

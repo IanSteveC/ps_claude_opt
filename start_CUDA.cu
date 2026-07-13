@@ -247,8 +247,8 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   cudaError_t res;
 
   //Global parameters
-  res = PS_SYMCPY(CUDA_beta_pole, beta_pole, sizeof(double) * (N_POLES + 1));
-  res = PS_SYMCPY(CUDA_lambda_pole, lambda_pole, sizeof(double) * (N_POLES + 1));
+  res = PS_SYMCPY_REAL(CUDA_beta_pole, beta_pole, N_POLES + 1);
+  res = PS_SYMCPY_REAL(CUDA_lambda_pole, lambda_pole, N_POLES + 1);
 
   for(int y = 1; y <= N_POLES; y++)
     {
@@ -257,23 +257,23 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
     }
 
   
-  res = PS_SYMCPY(CUDA_par, par, sizeof(double) * 4);
+  res = PS_SYMCPY_REAL(CUDA_par, par, 4);
   cl = log(cl);
-  res = PS_SYMCPY(CUDA_lcl, &cl, sizeof(cl));
-  res = PS_SYMCPY(CUDA_Alamda_start, &Alamda_start, sizeof(Alamda_start));
-  res = PS_SYMCPY(CUDA_Alamda_incr, &Alamda_incr, sizeof(Alamda_incr));
-  res = PS_SYMCPY(CUDA_Alamda_incrr, &Alamda_incrr, sizeof(Alamda_incrr));
+  res = PS_SYMCPY_REAL(CUDA_lcl, &cl, 1);
+  res = PS_SYMCPY_REAL(CUDA_Alamda_start, &Alamda_start, 1);
+  res = PS_SYMCPY_REAL(CUDA_Alamda_incr, &Alamda_incr, 1);
+  res = PS_SYMCPY_REAL(CUDA_Alamda_incrr, &Alamda_incrr, 1);
   res = PS_SYMCPY(CUDA_Mmax, &m_max, sizeof(m_max));
   res = PS_SYMCPY(CUDA_Lmax, &l_max, sizeof(l_max));
-  res = PS_SYMCPY(CUDA_tim, tim, sizeof(double) * (MAX_N_OBS + 1));
-  res = PS_SYMCPY(CUDA_Phi_0, &Phi_0, sizeof(Phi_0));
+  res = PS_SYMCPY_REAL(CUDA_tim, tim, MAX_N_OBS + 1);
+  res = PS_SYMCPY_REAL(CUDA_Phi_0, &Phi_0, 1);
 
   //res = cudaMalloc(&pWeight, (ndata + 3 + 1) * sizeof(double));
-  res = PS_SYMCPY(CUDA_Weight, weight, (ndata + 3 + 1) * sizeof(double)); //, cudaMemcpyHostToDevice);
+  res = PS_SYMCPY_REAL(CUDA_Weight, weight, ndata + 3 + 1); //, cudaMemcpyHostToDevice);
   //res = PS_SYMCPY(CUDA_Weight, &pWeight, sizeof(pWeight));
   
-  res = PS_SYMCPY(CUDA_ee, ee, 3 * (MAX_N_OBS + 1) * sizeof(double)); //, cudaMemcpyHostToDevice);
-  res = PS_SYMCPY(CUDA_ee0, ee0, 3 * (MAX_N_OBS + 1) * sizeof(double)); //, cudaMemcpyHostToDevice);
+  res = PS_SYMCPY_REAL(CUDA_ee, ee, 3 * (MAX_N_OBS + 1)); //, cudaMemcpyHostToDevice);
+  res = PS_SYMCPY_REAL(CUDA_ee0, ee0, 3 * (MAX_N_OBS + 1)); //, cudaMemcpyHostToDevice);
   
 
   int hp, lp;
@@ -405,25 +405,25 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
   m = Numfac + 1;
   PS_SYMCPY_ASYNC(CUDA_Numfac1, &m, sizeof(m), stream3);
   PS_SYMCPY_ASYNC(CUDA_ia, ia, sizeof(int) * (MAX_N_PAR + 1), stream3);
-  PS_SYMCPY_ASYNC(CUDA_cg_first, cg_first, sizeof(double) * (MAX_N_PAR + 1), stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_cg_first, cg_first, MAX_N_PAR + 1, stream3);
   PS_SYMCPY_ASYNC(CUDA_n_iter_max, &n_iter_max, sizeof(n_iter_max), stream3);
   PS_SYMCPY_ASYNC(CUDA_n_iter_min, &n_iter_min, sizeof(n_iter_min), stream3);
   PS_SYMCPY_ASYNC(CUDA_ndata, &ndata, sizeof(ndata), stream3);
-  PS_SYMCPY_ASYNC(CUDA_iter_diff_max, &iter_diff_max, sizeof(iter_diff_max), stream3);
-  PS_SYMCPY_ASYNC(CUDA_conw_r, &conw_r, sizeof(conw_r), stream3);
-  PS_SYMCPY_ASYNC(CUDA_Nor, normal, sizeof(double) * (MAX_N_FAC + 1) * 3, stream3);
-  PS_SYMCPY_ASYNC(CUDA_Fc, f_c, sizeof(double) * (MAX_N_FAC + 1) * (MAX_LM + 1), stream3);
-  PS_SYMCPY_ASYNC(CUDA_Fs, f_s, sizeof(double) * (MAX_N_FAC + 1) * (MAX_LM + 1), stream3);
-  PS_SYMCPY_ASYNC(CUDA_Pleg, pleg, sizeof(double) * (MAX_N_FAC + 1) * (MAX_LM + 1) * (MAX_LM + 1), stream3);
-  PS_SYMCPY_ASYNC(CUDA_Darea, d_area, sizeof(double) * (MAX_N_FAC + 1), stream3);
-  PS_SYMCPY_ASYNC(CUDA_Dsph, d_sphere, sizeof(double) * (MAX_N_FAC + 1) * (MAX_N_PAR + 1), stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_iter_diff_max, &iter_diff_max, 1, stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_conw_r, (const double *)&conw_r, 1, stream3) /* upstream quirk: conw_r is a pointer here; its bits behave as ~0.0 */;
+  PS_SYMCPY_REAL_ASYNC(CUDA_Nor, normal, (MAX_N_FAC + 1) * 3, stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Fc, f_c, (MAX_N_FAC + 1) * (MAX_LM + 1), stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Fs, f_s, (MAX_N_FAC + 1) * (MAX_LM + 1), stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Pleg, pleg, (MAX_N_FAC + 1) * (MAX_LM + 1) * (MAX_LM + 1), stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Darea, d_area, MAX_N_FAC + 1, stream3);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Dsph, d_sphere, (MAX_N_FAC + 1) * (MAX_N_PAR + 1), stream3);
   PS_LAUNCH(CudaBuildDsphT, MAX_N_FAC + 1, DYT_STRIDE, 0, stream3);
   PS_SYMCPY_ASYNC(CUDA_Is_Precalc, &isPrecalc, sizeof isPrecalc, stream3);
 
   //err = cudaMalloc(&pbrightness, (ndata + 1) * sizeof(double));
-  err = PS_SYMCPY_ASYNC(CUDA_brightness, brightness, (ndata + 1) * sizeof(double), stream3);
-  err = PS_SYMCPY_ASYNC(CUDA_sig, sig, (ndata + 1) * sizeof(double), stream3);
-  err = PS_SYMCPY_ASYNC(CUDA_sigr2, sigr2, (ndata + 1) * sizeof(double), stream3);
+  err = PS_SYMCPY_REAL_ASYNC(CUDA_brightness, brightness, ndata + 1, stream3);
+  err = PS_SYMCPY_REAL_ASYNC(CUDA_sig, sig, ndata + 1, stream3);
+  err = PS_SYMCPY_REAL_ASYNC(CUDA_sigr2, sigr2, ndata + 1, stream3);
 
   if (err) printf("Error: %s\n", cudaGetErrorString(err));
 
@@ -479,15 +479,15 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
       exit(3);
     }
   int gauss_st = (lmfit + 1) | 1;
-  size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(double);
+  size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(mreal);
 
 
   //  double *pa,
-  double *pco = NULL, *pdytemp = NULL, *pytemp = NULL;
+  mreal *pco = NULL, *pdytemp = NULL, *pytemp = NULL;
 
-  err = cudaMalloc(&pco, (size_t)(CUDA_Grid_dim_precalc) * (lmfit + 1) * (lmfit + 2) * sizeof(double));
-  err = cudaMalloc(&pdytemp, (size_t)(CUDA_Grid_dim_precalc + 1) * (max_lp + 1) * DYT_STRIDE * sizeof(double));
-  err = cudaMalloc(&pytemp, (size_t)CUDA_Grid_dim_precalc * (max_lp + 1) * sizeof(double));
+  err = cudaMalloc(&pco, (size_t)(CUDA_Grid_dim_precalc) * (lmfit + 1) * (lmfit + 2) * sizeof(mreal));
+  err = cudaMalloc(&pdytemp, (size_t)(CUDA_Grid_dim_precalc + 1) * (max_lp + 1) * DYT_STRIDE * sizeof(mreal));
+  err = cudaMalloc(&pytemp, (size_t)CUDA_Grid_dim_precalc * (max_lp + 1) * sizeof(mreal));
   if(err != cudaSuccess || pco == NULL || pdytemp == NULL || pytemp == NULL)
     {
       fprintf(stderr, "CUDA: precalc scratch allocation failed (%s)\n", cudaGetErrorString(err));
@@ -522,7 +522,7 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	  //zero global End signal
 	  *theEnd = 0;
 	  PS_SYMCPY_ASYNC(CUDA_End, theEnd, sizeof(int), stream3);
-	  PS_LAUNCH(CudaCalculatePreparePole, pdim1, 32, 0, stream3, freq_start, freq_step, n);
+	  PS_LAUNCH(CudaCalculatePreparePole, pdim1, 32, 0, stream3, ps_real_from_double(freq_start), ps_real_from_double(freq_step), n);
 
 	  //#ifdef _DEBUG
 	  //printf("ia[1] = %d\r\n", ia[1]);
@@ -690,11 +690,11 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 	  for(int p = 0; p < N_POLES; p++)
 	    {
 	      int b = m * N_POLES + p;
-	      if(isReported[b] == 1 && (best < 0 || (!isnan(dev_best[b]) && !(dev_best[b] >= dev_best[best]))))
+	      if(isReported[b] == 1 && (best < 0 || (!isnan(ps_real_to_double(dev_best[b])) && !(ps_real_to_double(dev_best[b]) >= ps_real_to_double(dev_best[best])))))
 		best = b;
 	    }
 	  if(best >= 0)
-	    sum_dark_facet = sum_dark_facet + dark_best[best];
+	    sum_dark_facet = sum_dark_facet + ps_real_to_double(dark_best[best]);
 	}
     } /* period loop */
 
@@ -805,23 +805,23 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
   m = Numfac + 1;
   PS_SYMCPY_ASYNC(CUDA_Numfac1, &m, sizeof(m), stream1);
   PS_SYMCPY_ASYNC(CUDA_ia, ia, sizeof(int) * (MAX_N_PAR + 1), stream1);
-  PS_SYMCPY_ASYNC(CUDA_cg_first, cg_first, sizeof(double) * (MAX_N_PAR + 1), stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_cg_first, cg_first, MAX_N_PAR + 1, stream1);
   PS_SYMCPY_ASYNC(CUDA_n_iter_max, &n_iter_max, sizeof(n_iter_max), stream1);
   PS_SYMCPY_ASYNC(CUDA_n_iter_min, &n_iter_min, sizeof(n_iter_min), stream1);
   PS_SYMCPY_ASYNC(CUDA_ndata, &ndata, sizeof(ndata), stream1);
-  PS_SYMCPY_ASYNC(CUDA_iter_diff_max, &iter_diff_max, sizeof(iter_diff_max), stream1);
-  PS_SYMCPY_ASYNC(CUDA_conw_r, &conw_r, sizeof(conw_r), stream1);
-  PS_SYMCPY_ASYNC(CUDA_Nor, normal, sizeof(double) * (MAX_N_FAC + 1) * 3, stream1);
-  PS_SYMCPY_ASYNC(CUDA_Fc, f_c, sizeof(double) * (MAX_N_FAC + 1) * (MAX_LM + 1), stream1);
-  PS_SYMCPY_ASYNC(CUDA_Fs, f_s, sizeof(double) * (MAX_N_FAC + 1) * (MAX_LM + 1), stream1);
-  PS_SYMCPY_ASYNC(CUDA_Pleg, pleg, sizeof(double) * (MAX_N_FAC + 1) * (MAX_LM + 1) * (MAX_LM + 1), stream1);
-  PS_SYMCPY_ASYNC(CUDA_Darea, d_area, sizeof(double) * (MAX_N_FAC + 1), stream1);
-  PS_SYMCPY_ASYNC(CUDA_Dsph, d_sphere, sizeof(double) * (MAX_N_FAC + 1) * (MAX_N_PAR + 1), stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_iter_diff_max, &iter_diff_max, 1, stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_conw_r, &conw_r, 1, stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Nor, normal, (MAX_N_FAC + 1) * 3, stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Fc, f_c, (MAX_N_FAC + 1) * (MAX_LM + 1), stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Fs, f_s, (MAX_N_FAC + 1) * (MAX_LM + 1), stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Pleg, pleg, (MAX_N_FAC + 1) * (MAX_LM + 1) * (MAX_LM + 1), stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Darea, d_area, MAX_N_FAC + 1, stream1);
+  PS_SYMCPY_REAL_ASYNC(CUDA_Dsph, d_sphere, (MAX_N_FAC + 1) * (MAX_N_PAR + 1), stream1);
   PS_LAUNCH(CudaBuildDsphT, MAX_N_FAC + 1, DYT_STRIDE, 0, stream1);
 
-  err = PS_SYMCPY_ASYNC(CUDA_brightness, brightness, (ndata + 1) * sizeof(double), stream1);
-  err = PS_SYMCPY_ASYNC(CUDA_sig, sig, (ndata + 1) * sizeof(double), stream1);
-  err = PS_SYMCPY_ASYNC(CUDA_sigr2, sigr2, (ndata + 1) * sizeof(double), stream1);
+  err = PS_SYMCPY_REAL_ASYNC(CUDA_brightness, brightness, ndata + 1, stream1);
+  err = PS_SYMCPY_REAL_ASYNC(CUDA_sig, sig, ndata + 1, stream1);
+  err = PS_SYMCPY_REAL_ASYNC(CUDA_sigr2, sigr2, ndata + 1, stream1);
 
   if (err) printf("Error: %s", cudaGetErrorString(err));
 
@@ -862,15 +862,15 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
       exit(3);
     }
   int gauss_st = (lmfit + 1) | 1;
-  size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(double);
+  size_t gauss_shb = (size_t)((lmfit + 1) * gauss_st + lmfit + 2) * sizeof(mreal);
 
 
-  double *pco = NULL, *pdytemp = NULL, *pytemp = NULL;
+  mreal *pco = NULL, *pdytemp = NULL, *pytemp = NULL;
 
-  err = cudaMalloc(&pco, (size_t)CUDA_grid_dim * (lmfit + 1) * (lmfit + 1) * sizeof(double));
+  err = cudaMalloc(&pco, (size_t)CUDA_grid_dim * (lmfit + 1) * (lmfit + 1) * sizeof(mreal));
   // dytemp/ytemp are per-curve scratch, sized by the longest curve rather than ndata
-  err = cudaMalloc(&pdytemp, (size_t)(CUDA_grid_dim + 1) * (max_lp + 1) * DYT_STRIDE * sizeof(double));
-  err = cudaMalloc(&pytemp, (size_t)CUDA_grid_dim * (max_lp + 1) * sizeof(double));
+  err = cudaMalloc(&pdytemp, (size_t)(CUDA_grid_dim + 1) * (max_lp + 1) * DYT_STRIDE * sizeof(mreal));
+  err = cudaMalloc(&pytemp, (size_t)CUDA_grid_dim * (max_lp + 1) * sizeof(mreal));
   if(err != cudaSuccess || pco == NULL || pdytemp == NULL || pytemp == NULL)
     {
       fprintf(stderr, "CUDA: scratch allocation failed (%s); grid %d\n", cudaGetErrorString(err), CUDA_grid_dim);
@@ -935,7 +935,7 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	  //zero global End signal
 	  *theEnd = 0;
 	  PS_SYMCPY_ASYNC(CUDA_End, theEnd, sizeof(int), stream1);
-	  PS_LAUNCH(CudaCalculatePreparePole, dim1, dim2, 0, stream1, freq_start, freq_step, n);
+	  PS_LAUNCH(CudaCalculatePreparePole, dim1, dim2, 0, stream1, ps_real_from_double(freq_start), ps_real_from_double(freq_step), n);
 
 	  //cudaStreamQuery(stream1);
 	  usleep(1);
@@ -1131,20 +1131,25 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	  for(int p = 0; p < N_POLES; p++)
 	    {
 	      int b = m * N_POLES + p;
-	      if(isReported[b] == 1 && (best < 0 || (!isnan(dev_best[b]) && !(dev_best[b] >= dev_best[best]))))
+	      if(isReported[b] == 1 && (best < 0 || (!isnan(ps_real_to_double(dev_best[b])) && !(ps_real_to_double(dev_best[b]) >= ps_real_to_double(dev_best[best])))))
 		best = b;
 	    }
 	  if(best >= 0)
 	    {
+	      double d_per = ps_real_to_double(per_best[best]);
+	      double d_dev = ps_real_to_double(dev_best[best]);
+	      double d_dark = ps_real_to_double(dark_best[best]);
+	      double d_la = ps_real_to_double(la_best[best]);
+	      double d_be = ps_real_to_double(be_best[best]);
 	      LinesWritten++;
 	      /* output file */
 	      if(n == 1 && m == 0)
 		{
-		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * per_best[best], dev_best[best], dev_best[best] * dev_best[best] * (ndata - 3), conw_r * escl * escl, round(la_best[best]), round(be_best[best]));
+		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * d_per, d_dev, d_dev * d_dev * (ndata - 3), conw_r * escl * escl, round(d_la), round(d_be));
 		}
 	      else
 		{
-		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * per_best[best], dev_best[best], dev_best[best] * dev_best[best] * (ndata - 3), dark_best[best], round(la_best[best]), round(be_best[best]));
+		  mf.printf("%.8f  %.6f  %.6f %4.1f %4.0f %4.0f\n", 24 * d_per, d_dev, d_dev * d_dev * (ndata - 3), d_dark, round(d_la), round(d_be));
 		}
 	    }
 	}

@@ -19,3 +19,7 @@ ps_fatbin_win.c
 winlibs/
 build_win.log
 make_linux.log
+build_fp64.log
+build_fp32.log
+build_fp64_full.log
+period_search_BOINC_cuda12000_fp32

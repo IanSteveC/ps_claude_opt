@@ -7,7 +7,7 @@ extern "C" __global__ void CudaCalculatePrepare(int n_start, int n_max);
 //__global__ void CudaCalculatePreparePole(int m, double freq_start, double freq_step, int n);
 // Pole-merged: each bid = (freq, pole); pole/freq derived from tid, beta/lambda from
 // __constant__ CUDA_beta_pole/CUDA_lambda_pole.
-extern "C" __global__ void CudaCalculatePreparePole(double freq_start, double freq_step, int n);
+extern "C" __global__ void CudaCalculatePreparePole(mreal freq_start, mreal freq_step, int n);
 
 extern "C" __global__ void CudaCalculateIter1Begin(int n_max);
 

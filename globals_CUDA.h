@@ -50,6 +50,7 @@ __device__ __device_builtin__ double __hiloint2double(int hi, int lo);
 
 
 #include "constants.h"
+#include "mreal.h"
 //NOTE: https://devtalk.nvidia.com/default/topic/517801/-34-texture-is-not-a-template-34-error-mvs-2010/
 
 // One block ("bid") = one (frequency, pole) pair since the pole merge;
@@ -61,36 +62,36 @@ __device__ __device_builtin__ double __hiloint2double(int hi, int lo);
 //global to all freq
 __constant__ extern int CUDA_Ncoef, CUDA_Numfac, CUDA_Numfac1, CUDA_Dg_block;
 __constant__ extern int CUDA_ma, CUDA_mfit, /*CUDA_mfit1,*/ CUDA_lastone, CUDA_lastma, CUDA_ncoef0;
-__constant__ extern double CUDA_cg_first[MAX_N_PAR + 1];
+__constant__ extern mreal CUDA_cg_first[MAX_N_PAR + 1];
 __constant__ extern int CUDA_n_iter_max, CUDA_n_iter_min, CUDA_ndata;
-__constant__ extern double CUDA_iter_diff_max;
-__constant__ extern double CUDA_conw_r;
+__constant__ extern mreal CUDA_iter_diff_max;
+__constant__ extern mreal CUDA_conw_r;
 __constant__ extern int CUDA_Lmax, CUDA_Mmax;
-__constant__ extern double CUDA_lcl, CUDA_Alamda_start, CUDA_Alamda_incr, CUDA_Alamda_incrr;
-__constant__ extern double CUDA_Phi_0;
-__constant__ extern double CUDA_beta_pole[N_POLES + 1];
-__constant__ extern double CUDA_lambda_pole[N_POLES + 1];
+__constant__ extern mreal CUDA_lcl, CUDA_Alamda_start, CUDA_Alamda_incr, CUDA_Alamda_incrr;
+__constant__ extern mreal CUDA_Phi_0;
+__constant__ extern mreal CUDA_beta_pole[N_POLES + 1];
+__constant__ extern mreal CUDA_lambda_pole[N_POLES + 1];
 
-__device__ extern double CUDA_par[4];
+__device__ extern mreal CUDA_par[4];
 __device__ extern int CUDA_ia[MAX_N_PAR + 1];
-__device__ extern double CUDA_Nor[3][MAX_N_FAC + 1];
-__device__ extern double CUDA_Fc[MAX_LM + 1][MAX_N_FAC + 1];
-__device__ extern double CUDA_Fs[MAX_LM + 1][MAX_N_FAC + 1];
+__device__ extern mreal CUDA_Nor[3][MAX_N_FAC + 1];
+__device__ extern mreal CUDA_Fc[MAX_LM + 1][MAX_N_FAC + 1];
+__device__ extern mreal CUDA_Fs[MAX_LM + 1][MAX_N_FAC + 1];
 
-__device__ extern double CUDA_Pleg[MAX_LM + 1][MAX_LM + 1][MAX_N_FAC + 1];
-__device__ extern double CUDA_Darea[MAX_N_FAC + 1]; 
-__device__ extern double CUDA_Dsph[MAX_N_PAR + 1][MAX_N_FAC + 1];
+__device__ extern mreal CUDA_Pleg[MAX_LM + 1][MAX_LM + 1][MAX_N_FAC + 1];
+__device__ extern mreal CUDA_Darea[MAX_N_FAC + 1]; 
+__device__ extern mreal CUDA_Dsph[MAX_N_PAR + 1][MAX_N_FAC + 1];
 
 __device__ extern int CUDA_End;
 __device__ extern int CUDA_Is_Precalc;
 
-__device__ extern double CUDA_tim[MAX_N_OBS + 1];
-__device__ extern double CUDA_brightness[MAX_N_OBS+1];
-__device__ extern double CUDA_sig[MAX_N_OBS+1];
-__device__ extern double CUDA_sigr2[MAX_N_OBS+1]; // (1/CUDA_sig^2) /*[MAX_N_OBS+1]*/;
-__device__ extern double CUDA_Weight[MAX_N_OBS+1];
-__device__ extern double CUDA_ee[3][MAX_N_OBS+1];
-__device__ extern double CUDA_ee0[3][MAX_N_OBS+1];
+__device__ extern mreal CUDA_tim[MAX_N_OBS + 1];
+__device__ extern mreal CUDA_brightness[MAX_N_OBS+1];
+__device__ extern mreal CUDA_sig[MAX_N_OBS+1];
+__device__ extern mreal CUDA_sigr2[MAX_N_OBS+1]; // (1/CUDA_sig^2) /*[MAX_N_OBS+1]*/;
+__device__ extern mreal CUDA_Weight[MAX_N_OBS+1];
+__device__ extern mreal CUDA_ee[3][MAX_N_OBS+1];
+__device__ extern mreal CUDA_ee0[3][MAX_N_OBS+1];
 #endif /* !PS_DRIVER_API */
 
 
@@ -101,19 +102,19 @@ __device__ extern double CUDA_ee0[3][MAX_N_OBS+1];
 //global to one thread
 struct freq_context
 {
-  double *Dg;   // unused since the DsphT rewrite (kept for struct/copy layout)
-  //double *alpha;
-  double *covar;
-  double *dytemp;
-  double *ytemp;
+  mreal *Dg;   // unused since the DsphT rewrite (kept for struct/copy layout)
+  //mreal *alpha;
+  mreal *covar;
+  mreal *dytemp;
+  mreal *ytemp;
 
-  //double cg[MAX_N_PAR + 1];
-  //double beta[MAX_N_PAR + 1];
-  double da[MAX_N_PAR + 1];
+  //mreal cg[MAX_N_PAR + 1];
+  //mreal beta[MAX_N_PAR + 1];
+  mreal da[MAX_N_PAR + 1];
 };
 
 #ifndef PS_DRIVER_API
-extern __device__ double *CUDA_Dg;
+extern __device__ mreal *CUDA_Dg;
 
 __device__ extern freq_context *CUDA_CC;
 #endif
@@ -122,7 +123,7 @@ __device__ extern freq_context *CUDA_CC;
 struct freq_result
 {
 	int isReported;
-	double dark_best, per_best, dev_best, la_best, be_best;
+	mreal dark_best, per_best, dev_best, la_best, be_best;
 };
 */
 
@@ -130,16 +131,16 @@ struct freq_result
 //LFR
 #ifndef PS_DRIVER_API
 __managed__ extern int isReported[N_BLOCKS];
-__managed__ extern double dark_best[N_BLOCKS];
-__managed__ extern double per_best[N_BLOCKS];
-__managed__ extern double dev_best[N_BLOCKS];
-__managed__ extern double la_best[N_BLOCKS];
-__managed__ extern double be_best[N_BLOCKS];
+__managed__ extern mreal dark_best[N_BLOCKS];
+__managed__ extern mreal per_best[N_BLOCKS];
+__managed__ extern mreal dev_best[N_BLOCKS];
+__managed__ extern mreal la_best[N_BLOCKS];
+__managed__ extern mreal be_best[N_BLOCKS];
 #else
 /* driver-API build: the __managed__ module variables are reached through
    host pointers resolved once from the fatbin (cuModuleGetGlobal returns a
    host-dereferenceable pointer for managed variables); same names keep the
    indexing code identical. Defined/initialized in cuda_iface.h. */
 extern int    *isReported;
-extern double *dark_best, *per_best, *dev_best, *la_best, *be_best;
+extern mreal *dark_best, *per_best, *dev_best, *la_best, *be_best;
 #endif
