@@ -251,3 +251,18 @@ SM/L1/L2 with 25% occupancy; going further means restructuring for lower
 register pressure per point (e.g. multi-point batching with shared staging of
 per-point geometry), estimated ≤ 2× more. Precalc (~4 s) is inherently
 latency-bound (only 100 (period, pole) pairs exist).
+
+## 2026-07-14 — reduced-precision DsphT mirror removed
+
+The FP32 mirror of `DsphT` and its arch gate (historically `FAT_FP64`,
+default-on for sm_60/70/80/90/100 and gfx906/CDNA) are deleted; every
+architecture now reads the full-precision table and uses the lane-parallel
+shuffle forms. Rationale: the mirror's 2^-24-rounded basis values cost exact
+pole (lambda/beta) agreement with the CPU reference on data-center cards
+(V100 default build: 12-86 mismatched poles per input on the 10-input suite;
+full-precision build: ZERO on all 10, most files 100% line-identical). The
+speed it bought (~25% on V100, ~6% on Radeon VII, never measured on
+A100/H100 whose larger L1 likely voids the cache argument) is not worth a
+silent accuracy asymmetry between host classes. V100 full-precision runtime:
+~30.5 s vs ~23 s on input_253_1-class WUs; GeForce/Jetson/RDNA unaffected
+(they always used the full-precision path).

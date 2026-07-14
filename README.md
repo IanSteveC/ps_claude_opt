@@ -17,9 +17,10 @@ Measured on Tesla V100-SXM2-16GB (CUDA 12.9), `input_gt_2000_test` suite:
 | gauss/batching/tuning | 36.6 s |
 | row pairing + FP32 basis + arch gating | **~23 s (≈ 7×)** |
 
-Also runs on Jetson Orin Nano (`Makefile_arm`) with arch-gated FP64-economy
-code paths (`FAT_FP64` in `Start.cu`) so data-center (1:2 FP64) and
-consumer/Jetson (1:32–1:64 FP64) GPUs each get their best variant.
+Also runs on Jetson Orin Nano (`Makefile_arm`). All architectures compute
+with the full-precision derivative table; a reduced-precision fast path for
+data-center GPUs was removed 2026-07-14 because it cost exact pole
+(lambda/beta) agreement with the CPU reference.
 
 ## Key changes vs upstream
 
@@ -134,7 +135,7 @@ make clean && make -j
 ```
 
 (`make clean` matters: stale single-arch objects from development builds will
-otherwise be relinked into the fat binary.)
+otherwise be relinked into the multi-arch binary.)
 
 Jetson (aarch64): `make -f Makefile_arm`.
 

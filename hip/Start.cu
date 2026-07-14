@@ -131,6 +131,14 @@ __device__ freq_context *CUDA_CC;
 
 // big global variables
 __device__ mreal CUDA_tim[MAX_N_OBS + 1];
+#ifdef PS_FP32
+/* time bits 49..53: the df64 pair holds only ~48 bits, so t as df64 is up to
+   ~1.5e-11 days off the double the FP64 app uses; over a 9700-day arc at
+   omega ~ 75 rad/day that alone jitters the rotation phase by ~1e-9 rad.
+   This residual (double tim minus the df64 value, exactly representable in
+   one float) restores the full 53 bits for the phase product below. */
+__device__ float CUDA_tim_lo[MAX_N_OBS + 1];
+#endif
 __device__ mreal CUDA_brightness[MAX_N_OBS+1];
 __device__ mreal CUDA_sig[MAX_N_OBS+1];
 __device__ mreal CUDA_sigr2[MAX_N_OBS+1]; // (1/CUDA_sig^2)
@@ -617,6 +625,70 @@ __device__ mreal __forceinline__ mrqcof_end(freq_context * __restrict__ CUDA_LCC
 }
 
 
+/* rotation phase f = (omega*t + phi_0) reduced by 2pi*round(f/(2pi)).
+   FP64 build: exactly the historical expression (bit-identical output).
+   PS_FP32 build: the naive df64 product carries ~2^-47 relative error, and
+   |omega*t| reaches ~7e5 rad over long arcs, so the REDUCED phase jittered
+   by up to ~5e-9 rad per point (vs ~8e-11 for the FP64 app) - measured as
+   the largest remaining df64-vs-FP64 divergence after the acos fix. Here the
+   product is assembled from error-free transformations (two_prod/two_sum),
+   the time gets its 49..53-bit residual back (tres, see CUDA_tim_lo), and
+   k*2pi is subtracted EXACTLY (2pi's 53-bit mantissa fits the three float
+   chunks; every k*chunk product is a two_prod). Total error ~2e-14 rad -
+   below the FP64 app's own phase rounding. Costs a handful of FP32 ops per
+   point, once per geometry evaluation. */
+#ifdef PS_FP32
+#define PS_TPI1 6.2831854820251465f
+#define PS_TPI2 -1.7484555314695172e-07f
+#define PS_TPI3 -7.1054273576010019e-15f
+#define PS_INV2PI 0.15915493667125702f
+__device__ mreal __forceinline__ ps_phase_mod2pi(mreal o, mreal t, float tres, mreal phi0)
+{
+  float e1, e2, e3, ke1, ke2, s0e;
+  float h1 = two_prod(o.hi, t.hi, e1);
+  float h2 = two_prod(o.hi, t.lo, e2);
+  float h3 = two_prod(o.lo, t.hi, e3);
+  /* pieces below ~1e-9 rad: plain float math is exact to ~1e-16 here */
+  float p4 = df64_fmaf(o.lo, t.lo, df64_fmul(o.hi, tres));
+  /* period count: float estimate suffices - an off-by-one near a half-period
+     boundary only shifts the result by a full 2pi, which sincos's own
+     quadrant reduction absorbs (|f| < 2pi + slack stays true) */
+  float kf = roundf(df64_fmaf(h1, PS_INV2PI, phi0.hi * PS_INV2PI));
+  float kp1 = two_prod(kf, PS_TPI1, ke1);
+  float kp2 = two_prod(kf, PS_TPI2, ke2);
+  float s0 = two_sum(h1, -kp1, s0e);   /* the big cancellation, exact */
+  /* sum the sub-radian pieces first (cheap full-precision adds at small
+     magnitude), fold into the pi-scale remainder last */
+  df64 small = df64(e1) - df64(ke1);
+  small = small + df64(h2, e2);
+  small = small + df64(h3, e3);
+  small = small - df64(kp2, ke2);
+  small = small + df64(df64_fmaf(kf, -PS_TPI3, p4));
+  small = small + phi0;
+  df64 f = df64(s0, s0e) + small;
+  /* kf came from a float-precision estimate and can be off by one near a
+     half-period boundary, leaving f = r +- 2pi with |r| <= pi. The sincos
+     VALUE would be unchanged, but callers assert |f| < 2pi
+     (__builtin_assume), so an out-of-range f is undefined behavior there -
+     normalize with one conditional 2pi correction (a plain df64 subtract is
+     fine at this magnitude: error 2^-48*2pi ~ 3e-14). */
+  const df64 ps__tpi = df64(6.283185307179586);
+  const df64 ps__pi  = df64(3.141592653589793);
+  if(f > ps__pi)       f = f - ps__tpi;
+  else if(f < -ps__pi) f = f + ps__tpi;
+  return f;
+}
+#define PS_TIM_LO(i) __ldg(&CUDA_tim_lo[i])
+#else
+__device__ mreal __forceinline__ ps_phase_mod2pi(mreal o, mreal t, float, mreal phi0)
+{
+  mreal f = o * t + phi0;
+  f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
+  return f;
+}
+#define PS_TIM_LO(i) 0.0f
+#endif
+
 // 47%
 __device__ void __forceinline__ mrqcof_curve1(freq_context * __restrict__ CUDA_LCC,
 					      mreal const * __restrict__ a,
@@ -692,17 +764,19 @@ __device__ void __forceinline__ mrqcof_curve1(freq_context * __restrict__ CUDA_L
 	  ee0_3 = CUDA_ee0[2][lnp];
 	  t = CUDA_tim[lnp];
       
-	  alpha = acos(((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3);
+	  /* same [-1,1] clamp as curve1_point_geometry: at opposition the dot
+	     lands within ~1e-7 of 1.0 and a legal FMA contraction can round it
+	     past the acos domain edge; fmin/fmax pass in-range values through
+	     unchanged (see the comment there) */
+	  alpha = acos(fmin(1.0, fmax(-1.0, ((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3)));
 	  nc00 = nc00s;
 	  phi0 = phi0s;
-	  f = nc00 * t + phi0;
-       
+	  /* fmod may give little different results than Mikko's */
+	  f = ps_phase_mod2pi(nc00, t, PS_TIM_LO(lnp), phi0); //3:41.9
+
 	  /* Exp-lin model (const.term=1.) */
 	  nc02r = nc02rs;
 	  mreal ff = exp2(-1.44269504088896 * (alpha * nc02r));
-
-	  /* fmod may give little different results than Mikko's */
-	  f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI))); //3:41.9
 
 	  nc01 = nc01s;
 	  nc03 = nc03s;
@@ -1999,11 +2073,6 @@ __device__ int __forceinline__ gauss_errc(freq_context * __restrict__ CUDA_LCC, 
 // tile (rank-K update from shared memory) instead of per point.
 
 __device__ __align__(128) mreal CUDA_DsphT[MAX_N_FAC + 2][DYT_STRIDE];
-/* float mirror for the bright() derivative sweep: the Jacobian tolerates
-   1e-7 relative rounding of the constant spherical-harmonics basis, and the
-   74KB float matrix is L1-resident where the mreal one was not; all
-   accumulation stays FP64 */
-__device__ __align__(128) float CUDA_DsphTf[MAX_N_FAC + 2][DYT_STRIDE];
 
 extern "C" __global__ void CudaBuildDsphT(void)
 {
@@ -2013,7 +2082,6 @@ extern "C" __global__ void CudaBuildDsphT(void)
   if(c <= MAX_N_PAR)
     v = CUDA_Dsph[c][f];
   CUDA_DsphT[f][c] = v;
-  CUDA_DsphTf[f][c] = (float)v;
 }
 
 // per-point geometry for curve1: called with a per-lane lnp so each lane
@@ -2040,9 +2108,8 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
      whenever it is already in range, so healthy results are bit-identical. */
   mreal cdot = ((ee_1 * ee0_1) + ee_2 * ee0_2) + ee_3 * ee0_3;
   mreal alph = acos(fmin(1.0, fmax(-1.0, cdot)));
-  mreal f = inv[0] * t + CUDA_Phi_0;
+  mreal f = ps_phase_mod2pi(inv[0], t, PS_TIM_LO(lnp), CUDA_Phi_0);
   mreal ff = exp2(-1.44269504088896 * (alph * inv[2]));
-  f = f - 2.0 * PI * round(f * (1.0 / (2.0 * PI)));
   mreal scale = 1.0 + inv[1] * ff + inv[3] * alph;
   mreal d2 = inv[1] * ff * alph * inv[4];
 
@@ -2131,37 +2198,11 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
 /* curve1 and curve2 run back-to-back in the fused kernels and never use
    their shared staging at the same time, so both live in one per-warp union:
    the block's shared footprint is max(c1,c2), not the sum. */
-/* FP64-throughput class of the target: data-center parts (P100/V100/A100/
-   H100/B100, >= 1:2 FP64) have DP to burn and are bandwidth/latency-bound, so
-   they read the FP32 DsphT mirror (converts are cheap) and compute the curve2
-   row products as uniform DP multiplies. Consumer GeForce and Jetson parts
-   (1:32..1:64 FP64) are DP-pipe-bound: they read the FP64 table directly (no
-   convert instructions) and broadcast lane-parallel products via shuffles on
-   the integer pipe. Each SASS architecture compiles its own branch. */
-#if defined(PS_FP32)
-/* FP32-emulation build: always take the economy branch (df64 table reads +
-   shuffle-broadcast products, no FP64 pipe to feed). */
-#define FAT_FP64 0
-#elif defined(__HIP_DEVICE_COMPILE__)
-  /* AMD: high-FP64-rate parts (Radeon VII 1:4, CDNA gfx908/90a >=1:2) take the
-     data-center "fat FP64" branch; RDNA consumer parts (~1:16..1:32) take the
-     DP-pipe economy branch - same split the CUDA gate makes for DC vs GeForce. */
-  #if defined(PS_FORCE_FATFP64)
-  #define FAT_FP64 1
-  #elif defined(PS_FORCE_ECON)
-  #define FAT_FP64 0
-  #elif defined(__gfx906__) || defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx940__) || defined(__gfx942__)
-  /* Radeon VII (measured: fat 93.9s < econ 99.8s) + CDNA (>=1:2): fat path */
-  #define FAT_FP64 1
-  #else
-  /* RDNA consumer (<=1:16 FP64): DP-pipe-bound, econ path */
-  #define FAT_FP64 0
-  #endif
-#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 600 || __CUDA_ARCH__ == 700 || __CUDA_ARCH__ == 800 || __CUDA_ARCH__ == 900 || __CUDA_ARCH__ == 1000)
-#define FAT_FP64 1
-#else
-#define FAT_FP64 0
-#endif
+/* All arithmetic reads the full-precision DsphT table on every arch. A
+   reduced-precision float mirror of the table existed until 2026-07-14 as a
+   data-center speed trick (~25% on V100, ~6% on Radeon VII); it was removed
+   because it cost exact pole (lambda/beta) agreement with the CPU reference
+   (full-precision path validated: 10-input suite, zero pole flips). */
 
 #define CURVE2_K 8
 
@@ -2363,27 +2404,13 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
 	    {
 	      mreal wA = wcA[j];
 	      mreal wB = wcB[j];
-#if FAT_FP64
-	      /* FP32 mirror: halves the dominant read stream; the converts are
-		 cheap when the DP pipe is wide (measured +12% on V100) */
-	      float const * __restrict__ row = CUDA_DsphTf[fc[j]];
-	      mreal v1 = (mreal)row[c1];
-#else
-	      /* FP64 table: on low-FP64-ratio GPUs (consumer/Jetson) the
-		 F32->F64 convert costs a full DP-pipe slot per load - dearer
-		 than the bandwidth the float table saves */
 	      mreal const * __restrict__ row = CUDA_DsphT[fc[j]];
 	      mreal v1 = row[c1];
-#endif
 	      accA1 += wA * v1;
 	      accB1 += wB * v1;
 	      if(c2 <= nshape)
 		{
-#if FAT_FP64
-		  mreal v2 = (mreal)row[c2];
-#else
 		  mreal v2 = row[c2];
-#endif
 		  accA2 += wA * v2;
 		  accB2 += wB * v2;
 		}
@@ -2678,21 +2705,12 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
       for(int l = 1; l <= rowEndIncl; l++, alphrow += mf1)
 	{
 	  mreal w[CURVE2_K];
-#if FAT_FP64
-	  /* uniform DP multiplies: shuffles would ride the MIO pipe this
-	     kernel already saturates with shared-memory traffic (measured
-	     +17% on V100 for the shuffle form) */
-#pragma unroll
-	  for(int p = 0; p < CURVE2_K; p++)
-	    w[p] = T[p][l] * s2w[p];
-#else
 	  /* lane p computes T[p][l]*s2w[p]; everyone gets all K via shuffle
 	     (integer pipe) instead of K uniform multiplies on the FP64 pipe */
 	  mreal wown = (tid < CURVE2_K) ? T[tid][l] * s2w[tid] : 0.0;
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
 	    w[p] = __shfl_sync(0xffffffff, wown, p);
-#endif
 
 	  int cend = colStrictLess ? (l - 1) : l;
 #pragma unroll 1
@@ -2705,16 +2723,6 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	      mreal * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
-#if FAT_FP64
-	  if(tid == 0)
-	    {
-	      mreal b = 0.0;
-#pragma unroll
-	      for(int p = 0; p < CURVE2_K; p++)
-		b += dws[p] * T[p][l];
-	      __stwb(&beta[l], __ldca(&beta[l]) + b);
-	    }
-#else
 	  {
 	    /* products lane-parallel, summed in lane 0 in ascending p order */
 	    mreal bown = (tid < CURVE2_K) ? dws[tid] * T[tid][l] : 0.0;
@@ -2725,7 +2733,6 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	    if(tid == 0)
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
 	  }
-#endif
 	}
 
       /* ---- tail rows with ia[] gating (only when lastone < lastma; ---- */

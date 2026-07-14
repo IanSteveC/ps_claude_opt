@@ -314,6 +314,17 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   res = PS_SYMCPY(CUDA_Mmax, &m_max, sizeof(m_max));
   res = PS_SYMCPY(CUDA_Lmax, &l_max, sizeof(l_max));
   res = PS_SYMCPY_REAL(CUDA_tim, tim, MAX_N_OBS + 1);
+#ifdef PS_FP32
+  {
+    /* time bits 49..53 that the df64 pair cannot hold (see CUDA_tim_lo in
+       Start.cu): residual of the double vs its df64 rounding, itself exactly
+       representable in one float */
+    static float tim_lo[MAX_N_OBS + 1];
+    for(int i = 0; i <= MAX_N_OBS; i++)
+      tim_lo[i] = (float)(tim[i] - ps_real_to_double(ps_real_from_double(tim[i])));
+    res = PS_SYMCPY(CUDA_tim_lo, tim_lo, (MAX_N_OBS + 1) * sizeof(float));
+  }
+#endif
   res = PS_SYMCPY_REAL(CUDA_Phi_0, &Phi_0, 1);
 
   //res = hipMalloc(&pWeight, (ndata + 3 + 1) * sizeof(double));

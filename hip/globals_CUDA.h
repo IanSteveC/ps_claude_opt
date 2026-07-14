@@ -89,6 +89,9 @@ __device__ extern int CUDA_End;
 __device__ extern int CUDA_Is_Precalc;
 
 __device__ extern mreal CUDA_tim[MAX_N_OBS + 1];
+#ifdef PS_FP32
+__device__ extern float CUDA_tim_lo[MAX_N_OBS + 1];  /* time bits 49..53, see Start.cu */
+#endif
 __device__ extern mreal CUDA_brightness[MAX_N_OBS+1];
 __device__ extern mreal CUDA_sig[MAX_N_OBS+1];
 __device__ extern mreal CUDA_sigr2[MAX_N_OBS+1]; // (1/CUDA_sig^2) /*[MAX_N_OBS+1]*/;

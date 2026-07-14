@@ -11,11 +11,6 @@
  *      crucially, pin the shuffle WIDTH to 32 so the 32-wide tree reductions
  *      stay correct on wave64 hardware (Radeon VII, CDNA) as well as wave32
  *      (RDNA). Phase-1 correctness relies on this width pin.
- *   3. FP64-economy arch gate (FAT_FP64): choose the branch by AMD DP:FP ratio
- *      instead of __CUDA_ARCH__. CDNA (gfx908/90a) and Radeon VII (gfx906) are
- *      >=1:2 / 1:4 FP64 -> take the data-center "fat FP64" path; RDNA consumer
- *      parts (~1:16..1:32) take the DP-pipe-economy path, same reasoning the
- *      CUDA build applies to data-center vs GeForce.
  */
 #pragma once
 

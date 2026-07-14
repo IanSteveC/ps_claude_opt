@@ -151,6 +151,58 @@ bool SetCUDABlockingSync(const int device)
 int *theEnd = NULL;
 double g_beta[N_POLES+1], g_lambda[N_POLES+1];
 
+#ifdef PS_ITER_DUMP
+/* diagnostic build only (-DPS_ITER_DUMP): dump per-bid LM state at the top
+   of every host iteration pass to iterdump.bin, so an FP32 and an FP64 run
+   of the same input can be compared bid-for-bid, iteration-for-iteration.
+   Costs a stream sync per pass; never enabled in production builds. */
+extern __device__ mreal Chisq[N_BLOCKS];
+extern __device__ mreal Ochisq[N_BLOCKS];
+extern __device__ mreal trial_chisqg[N_BLOCKS];
+extern __device__ mreal aveg[N_BLOCKS];
+extern __device__ mreal Alamda[N_BLOCKS];
+extern __device__ mreal dev_newg[N_BLOCKS];
+extern __device__ mreal iter_diffg[N_BLOCKS];
+extern __device__ int Niter[N_BLOCKS];
+
+static void ps_iter_dump(int nbatch, int loop, int grid, cudaStream_t st)
+{
+  static FILE *df = NULL;
+  static mreal *mbuf = NULL;
+  static int *ibuf = NULL;
+  static double *obuf = NULL;
+  if(!df)
+    {
+      df = fopen("iterdump.bin", "wb");
+      mbuf = (mreal *)malloc(N_BLOCKS * sizeof(mreal));
+      ibuf = (int *)malloc(N_BLOCKS * sizeof(int));
+      obuf = (double *)malloc(N_BLOCKS * sizeof(double));
+      if(!df || !mbuf || !ibuf || !obuf) { fprintf(stderr, "iterdump alloc failed\n"); exit(1); }
+    }
+  cudaStreamSynchronize(st);
+  fwrite(&nbatch, sizeof(int), 1, df);
+  fwrite(&loop, sizeof(int), 1, df);
+  fwrite(&grid, sizeof(int), 1, df);
+  cudaMemcpyFromSymbol(ibuf, Niter, grid * sizeof(int));
+  fwrite(ibuf, sizeof(int), grid, df);
+#define PS_DUMP_ARR(sym)                                          \
+  do {                                                            \
+    cudaMemcpyFromSymbol(mbuf, sym, grid * sizeof(mreal));        \
+    for(int q = 0; q < grid; q++) obuf[q] = ps_real_to_double(mbuf[q]); \
+    fwrite(obuf, sizeof(double), grid, df);                       \
+  } while(0)
+  PS_DUMP_ARR(Chisq);
+  PS_DUMP_ARR(Ochisq);
+  PS_DUMP_ARR(trial_chisqg);
+  PS_DUMP_ARR(aveg);
+  PS_DUMP_ARR(Alamda);
+  PS_DUMP_ARR(dev_newg);
+  PS_DUMP_ARR(iter_diffg);
+#undef PS_DUMP_ARR
+  fflush(df);
+}
+#endif /* PS_ITER_DUMP */
+
 
 int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par, double cl,
 		double Alamda_start, double Alamda_incr, double Alamda_incrr,
@@ -266,6 +318,17 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
   res = PS_SYMCPY(CUDA_Mmax, &m_max, sizeof(m_max));
   res = PS_SYMCPY(CUDA_Lmax, &l_max, sizeof(l_max));
   res = PS_SYMCPY_REAL(CUDA_tim, tim, MAX_N_OBS + 1);
+#ifdef PS_FP32
+  {
+    /* time bits 49..53 that the df64 pair cannot hold (see CUDA_tim_lo in
+       Start.cu): residual of the double vs its df64 rounding, itself exactly
+       representable in one float */
+    static float tim_lo[MAX_N_OBS + 1];
+    for(int i = 0; i <= MAX_N_OBS; i++)
+      tim_lo[i] = (float)(tim[i] - ps_real_to_double(ps_real_from_double(tim[i])));
+    res = PS_SYMCPY(CUDA_tim_lo, tim_lo, (MAX_N_OBS + 1) * sizeof(float));
+  }
+#endif
   res = PS_SYMCPY_REAL(CUDA_Phi_0, &Phi_0, 1);
 
   //res = cudaMalloc(&pWeight, (ndata + 3 + 1) * sizeof(double));
@@ -713,6 +776,10 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 
   ave_dark_facet = sum_dark_facet / max_test_periods;
 
+#ifdef PS_ITER_DUMP
+  fprintf(stderr, "PRECALC ave_dark_facet = %.15f (threshold 1.0, conw_r %g)\n",
+          ave_dark_facet, *conw_r);
+#endif
   if(ave_dark_facet < 1.0)
     *new_conw = 1; /* new correct conwexity weight */
   if(ave_dark_facet >= 1.0)
@@ -949,6 +1016,9 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 	  
 	  while(!*(volatile int *)theEnd)
 	    {
+#ifdef PS_ITER_DUMP
+	      ps_iter_dump(n, loop, CUDA_grid_dim, stream1);
+#endif
 	      sched_yield();
 	      PS_LAUNCH(CudaCalculateIter1Begin, dim1, dim2, 0, stream1, CUDA_grid_dim); // RRRR
 	      cudaEventRecord(event1, stream1);
