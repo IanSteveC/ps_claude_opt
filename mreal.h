@@ -462,12 +462,16 @@ DF64_MATH df64 exp2(df64 x)
    in df64 (exact by cancellation when x ~ 1, so the full 9e-8 survives), the
    sqrt argument is small, and an asin Taylor series to t^9 holds df64
    precision (|t| <= 7.1e-3 => t^8 relative ~ 2^-53). */
-DF64_MATH df64 df64_asin_small(df64 t)   /* |t| <= ~7.1e-3 */
+DF64_MATH df64 df64_asin_small(df64 t)   /* |t| <= ~7.1e-2 */
 {
   df64 t2 = t * t;
   /* single-double coefficients: the double-double tails are below df64's
-     ~48-bit floor, so the nearest double is already exact for df64. */
-  df64 p = df64(0.030381944444444444);   /* 35/1152 */
+     ~48-bit floor, so the nearest double is already exact for df64.
+     Degree 13 holds ~1e-18 relative up to |t| = 0.0708 (= sqrt(0.005*1.01),
+     the acos identity-path bound below). */
+  df64 p = df64(0.017352764423076924);   /* 231/13312 */
+  p = p * t2 + df64(0.022372159090909092); /* 63/2816 */
+  p = p * t2 + df64(0.030381944444444444); /* 35/1152 */
   p = p * t2 + df64(0.044642857142857144); /* 5/112 */
   p = p * t2 + df64(0.075);              /* 3/40 */
   p = p * t2 + df64(0.16666666666666666); /* 1/6 */
@@ -478,12 +482,17 @@ DF64_MATH df64 acos(df64 x)
 {
   if(!(x < df64(1.0f)))  return df64(0.0f);
   if(!(x > df64(-1.0f))) return df64(3.141592653589793);
-  if(x.hi > 0.9999f)
+  /* identity-path band widened from 0.9999 to 0.99: the app's solar phase
+     angles (0..30 deg) put acos's argument in [0.87, 1], i.e. mostly INSIDE
+     the old Newton band right where its error amplification cot(y) is
+     largest. |x| > 0.99 -> |t| <= 0.0708, still within the asin Taylor
+     above; the Newton band below keeps cot(y) <= 7. */
+  if(x.hi > 0.99f)
     {
       df64 t = __dsqrt_rn((df64(1.0f) - x) * df64(0.5));
       return df64(2.0f) * df64_asin_small(t);
     }
-  if(x.hi < -0.9999f)
+  if(x.hi < -0.99f)
     {
       df64 t = __dsqrt_rn((df64(1.0f) + x) * df64(0.5));
       return df64(3.141592653589793) - df64(2.0f) * df64_asin_small(t);
@@ -491,7 +500,19 @@ DF64_MATH df64 acos(df64 x)
   float y0 = acosf(x.hi);
   df64 s, c;
   sincos(df64(y0), &s, &c);
-  df64 y = df64(y0) + (c - x) / s;
+  df64 d = (c - x) / s;
+  /* second-order Newton term. Solving cos(y) = x from seed y0 gives
+     h = d - (c/(2s))*d^2 + O(d^3); stopping at d leaves a residual of
+     (c/2s)*d^2 -- with |d| up to ~2.7e-6 (acosf seed error + the ignored
+     x.lo) and cot(y) up to ~70 at the 0.9999 band edge, that is a bias of
+     up to 1.4e-10 (measured), five decades above df64 resolution, and it is
+     one-signed: cot(y) > 0 for every solar phase angle < 90 deg, so every
+     alpha in the app came out systematically high. With the term included
+     the residual is the O(d^3) piece, < 1e-18. Plain float suffices: the
+     term itself is <= ~3e-10, so float rounding contributes < 2e-17. */
+  float dh = d.hi;
+  float corr = -0.5f * (c.hi / s.hi) * (dh * dh);
+  df64 y = (df64(y0) + d) + df64(corr);
   return y;
 }
 
