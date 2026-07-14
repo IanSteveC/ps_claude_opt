@@ -15,7 +15,7 @@ Measured on Tesla V100-SXM2-16GB (CUDA 12.9), `input_gt_2000_test` suite:
 | pole-merge (bit-exact) | 87 s |
 | memory-layout rewrite | 44.5 s |
 | gauss/batching/tuning | 36.6 s |
-| row pairing + FP32 basis + arch gating | **~23 s (≈ 7×)** |
+| two-point row pairing | **~30 s (≈ 5.6×)** |
 
 Also runs on Jetson Orin Nano (`Makefile_arm`). All architectures compute
 with the full-precision derivative table; a reduced-precision fast path for
@@ -27,8 +27,8 @@ data-center GPUs was removed 2026-07-14 because it cost exact pole
 - One CUDA block per (trial frequency, pole) pair — the 10 pole trials run
   concurrently instead of serially (bit-exact, ~2×).
 - Per-block `Dg` matrix eliminated via the rank-1 identity `Dg = Dsph · g`;
-  derivative sums gather from one shared, transposed, cache-resident basis
-  matrix (`CUDA_DsphT`, plus an FP32 mirror used on high-FP64-rate GPUs).
+  derivative sums gather from one shared, transposed, cache-resident,
+  full-precision basis matrix (`CUDA_DsphT`).
 - Warp-cooperative brightness/derivative kernel; transposed per-point scratch
   (`dytempT`); rank-8 shared-memory tiles for the normal-equation updates;
   two-point row pairing halves the dominant cache stream.
