@@ -2210,6 +2210,27 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
 
 #define CURVE2_K 8
 
+/* Product-form selection for the rank-K tile update in curve2. BOTH forms
+   compute identical products and sum them in identical order - results are
+   bit-identical (enforced by full-suite output diff); this selects ONLY
+   which execution unit does the work. High-FP64-throughput parts (>=1:2:
+   P100/V100/A100/H100/B100) compute the K products redundantly in every
+   lane: their FP64 pipe has capacity to spare, while warp shuffles would
+   ride the MIO pipe this kernel already saturates with shared-memory
+   traffic (+17% measured on V100 for the shuffle form). Low-FP64-ratio
+   parts (GeForce, Jetson) broadcast lane-parallel products via shuffles to
+   keep redundant work off the scarce FP64 pipe. Precision is never gated
+   here - the full-precision table and accumulation are unconditional. */
+#if defined(PS_FP32)
+/* df64 products run on the FP32 pipe; redundant per-lane emulation would
+   multiply the work 8x - keep the lane-parallel form */
+#define PS_TILE_PRODUCTS_UNIFORM 0
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 600 || __CUDA_ARCH__ == 700 || __CUDA_ARCH__ == 800 || __CUDA_ARCH__ == 900 || __CUDA_ARCH__ == 1000)
+#define PS_TILE_PRODUCTS_UNIFORM 1
+#else
+#define PS_TILE_PRODUCTS_UNIFORM 0
+#endif
+
 #define GEO_BATCH 16
 
 struct c1share
@@ -2699,12 +2720,20 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
       for(int l = 1; l <= rowEndIncl; l++, alphrow += mf1)
 	{
 	  mreal w[CURVE2_K];
+#if PS_TILE_PRODUCTS_UNIFORM
+	  /* __dmul_rn: forbid FMA contraction so each product is rounded
+	     exactly like the shuffle form's standalone multiply */
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    w[p] = __dmul_rn(T[p][l], s2w[p]);
+#else
 	  /* lane p computes T[p][l]*s2w[p]; everyone gets all K via shuffle
 	     (integer pipe) instead of K uniform multiplies on the FP64 pipe */
 	  mreal wown = (tid < CURVE2_K) ? T[tid][l] * s2w[tid] : 0.0;
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
 	    w[p] = __shfl_sync(0xffffffff, wown, p);
+#endif
 
 	  int cend = colStrictLess ? (l - 1) : l;
 #pragma unroll 1
@@ -2717,6 +2746,19 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	      mreal * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
+#if PS_TILE_PRODUCTS_UNIFORM
+	  if(tid == 0)
+	    {
+	      /* same products, same ascending-p order as the shuffle form;
+		 __dmul_rn forbids the mul+add fusing into one FMA, which
+		 would round once where the shuffle form rounds twice */
+	      mreal b = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		b += __dmul_rn(dws[p], T[p][l]);
+	      __stwb(&beta[l], __ldca(&beta[l]) + b);
+	    }
+#else
 	  {
 	    /* products lane-parallel, summed in lane 0 in ascending p order */
 	    mreal bown = (tid < CURVE2_K) ? dws[tid] * T[tid][l] : 0.0;
@@ -2727,6 +2769,7 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	    if(tid == 0)
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
 	  }
+#endif
 	}
 
       /* ---- tail rows with ia[] gating (only when lastone < lastma; ---- */
