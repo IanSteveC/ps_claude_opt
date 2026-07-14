@@ -2206,6 +2206,39 @@ __device__ void __forceinline__ curve1_point_geometry(int lnp,
 
 #define CURVE2_K 8
 
+/* Product-form selection for the rank-K tile update in curve2. BOTH forms
+   compute identical products and sum them in identical ascending-p order -
+   results are bit-identical (enforced by full-suite output diff); this
+   selects ONLY which execution unit does the work. The CUDA tree runs the
+   uniform (redundant per-lane) form on high-FP64 data-center parts (+17%
+   on V100: their FP64 pipe has capacity to spare while shuffles ride the
+   MIO pipe the kernel already saturates). That trade does NOT carry to
+   GCN: on Radeon VII (gfx906, 1:4 DP, wave64, 2 waves/SIMD resident) the
+   uniform form measured ~4% SLOWER (10-input suite 813.7s vs 781.3s,
+   byte-identical output) - 8 redundant v_mul_f64 issues cost more than
+   the ds_bpermute broadcasts they replace. So every AMD arch defaults to
+   the shuffle form; CDNA (gfx908/90a/940/942, 1:2 DP) is untested and can
+   be trialed with -DPS_FORCE_TILE_UNIFORM without touching source.
+   Precision is never gated here - the full-precision table and
+   accumulation are unconditional. */
+#if defined(PS_FP32)
+/* df64 products run on the FP32 pipe; redundant per-lane emulation would
+   multiply the work 8x - keep the lane-parallel form */
+#define PS_TILE_PRODUCTS_UNIFORM 0
+#elif defined(PS_FORCE_TILE_UNIFORM)
+#define PS_TILE_PRODUCTS_UNIFORM 1
+#else
+#define PS_TILE_PRODUCTS_UNIFORM 0
+#endif
+
+/* The FP64 build compiles with -ffp-contract=fast, under which even the
+   CUDA-style __dmul_rn(a,b)+c fence contracts to a single v_fma_f64
+   (verified by gfx906 disassembly) - fusing rounds once where the shuffle
+   form rounds twice, which breaks bit-identity. This zero-cost asm barrier
+   pins the product to its own rounded register value so the following add
+   cannot fuse with it. */
+#define PS_TILE_FENCE(x) asm volatile("" : "+v"(x))
+
 /* gfx906 (Radeon VII) hot curve kernels are VGPR-heavy (~140 VGPR -> only 1
    wave/SIMD, which starves latency hiding). Requesting 4 waves is unachievable
    so the allocator ignores it and stays at 1; requesting 2 makes it spill just
@@ -2705,12 +2738,25 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
       for(int l = 1; l <= rowEndIncl; l++, alphrow += mf1)
 	{
 	  mreal w[CURVE2_K];
+#if PS_TILE_PRODUCTS_UNIFORM
+	  /* every lane computes all K products on the FP64 pipe; the asm
+	     barrier keeps each one a standalone v_mul_f64 rounded exactly
+	     like the shuffle form's lane-local multiply */
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    {
+	      mreal wp = T[p][l] * s2w[p];
+	      PS_TILE_FENCE(wp);
+	      w[p] = wp;
+	    }
+#else
 	  /* lane p computes T[p][l]*s2w[p]; everyone gets all K via shuffle
 	     (integer pipe) instead of K uniform multiplies on the FP64 pipe */
 	  mreal wown = (tid < CURVE2_K) ? T[tid][l] * s2w[tid] : 0.0;
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
 	    w[p] = __shfl_sync(0xffffffff, wown, p);
+#endif
 
 	  int cend = colStrictLess ? (l - 1) : l;
 #pragma unroll 1
@@ -2723,6 +2769,23 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	      mreal * __restrict__ ap = alphrow + colOff + xx;
 	      __stwb(ap, __ldca(ap) + acc);
 	    }
+#if PS_TILE_PRODUCTS_UNIFORM
+	  if(tid == 0)
+	    {
+	      /* same products, same ascending-p order as the shuffle form;
+		 the barrier forbids each mul fusing into the following add,
+		 which would round once where the shuffle form rounds twice */
+	      mreal b = 0.0;
+#pragma unroll
+	      for(int p = 0; p < CURVE2_K; p++)
+		{
+		  mreal bp = dws[p] * T[p][l];
+		  PS_TILE_FENCE(bp);
+		  b += bp;
+		}
+	      __stwb(&beta[l], __ldca(&beta[l]) + b);
+	    }
+#else
 	  {
 	    /* products lane-parallel, summed in lane 0 in ascending p order */
 	    mreal bown = (tid < CURVE2_K) ? dws[tid] * T[tid][l] : 0.0;
@@ -2733,6 +2796,7 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	    if(tid == 0)
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
 	  }
+#endif
 	}
 
       /* ---- tail rows with ia[] gating (only when lastone < lastma; ---- */

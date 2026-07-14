@@ -266,3 +266,53 @@ A100/H100 whose larger L1 likely voids the cache argument) is not worth a
 silent accuracy asymmetry between host classes. V100 full-precision runtime:
 ~30.5 s vs ~23 s on input_253_1-class WUs; GeForce/Jetson/RDNA unaffected
 (they always used the full-precision path).
+
+Two bit-identical optimizations then clawed most of the V100 loss back
+(byte-compared on all 10 suite inputs):
+- `26d74f8` curve2 rank-K tile product FORM gate (`PS_TILE_PRODUCTS_UNIFORM`):
+  high-FP64 NVIDIA parts compute the K products redundantly per lane on the
+  idle FP64 pipe instead of shuffle-broadcasting over the saturated MIO pipe.
+  `__dmul_rn` fences the product so nvcc's FMA contraction cannot fuse it
+  into the following add. V100 suite 296 → 254 s.
+- `edf1262` split the fused M12 I1 curve kernels (port of the HIP tree's
+  a3350cf split): dytemp already round-trips through global memory between
+  the curve1/curve2 phases, so the split adds no traffic. V100 suite
+  254 → 236 s (input_239_1 29.9 → 23.2 s vs the old reduced-precision
+  build's 22.7 s — ~2% gap at full precision).
+
+## 2026-07-14 — HIP port of the product-form gate: measured, LOSES on gfx906
+
+Ported `PS_TILE_PRODUCTS_UNIFORM` to `hip/Start.cu` to test whether the V100's
++17% carries to high-FP64 AMD parts. Two HIP-specific findings:
+
+- **`__dmul_rn` is NOT a contraction fence under hipcc.** The FP64 HIP build
+  uses `-ffp-contract=fast` (build_hip.sh), and clang fuses
+  `__dmul_rn(a,b)+c` into one `v_fma_f64` anyway (verified by gfx906
+  disassembly) — that rounds once where the shuffle form rounds twice,
+  breaking bit-identity. The working fence is a zero-cost inline-asm
+  barrier after the multiply: `asm volatile("" : "+v"(p))`
+  (`PS_TILE_FENCE`). ISA-checked: 8 standalone `v_mul_f64` + `v_add_f64`
+  chain, zero fused FMAs in the guarded sites.
+- **The uniform form is ~4% SLOWER on Radeon VII** (gfx906, 1:4 DP, wave64,
+  2 waves/SIMD): 10-input suite 813.7 s uniform vs 781.3 s shuffle, slower
+  on every input (outputs byte-identical to each other, pairwise-diffed).
+  The V100 argument doesn't hold on GCN: 8 redundant `v_mul_f64` issues at
+  1:4 rate cost more than the `ds_bpermute` broadcasts they replace, and
+  with only 2 resident waves the extra VALU time sits on the critical path.
+
+Decision: every AMD arch defaults to the shuffle form — the shipped HIP
+binary is instruction-identical to the previous build (ISA-diffed for
+gfx906 and gfx1030). The gate + fence stay in the source for CDNA
+(gfx908/90a/940/942, 1:2 DP, untested — no hardware): build with
+`PS_EXTRA_DEFS=-DPS_FORCE_TILE_UNIFORM` to trial it; the uniform form is
+already hardware-validated byte-identical on the full suite.
+
+Suite-reference note (matters for anyone re-running validation): the 9
+`period_search_out_*_fma` references are CRLF (Windows CPU build) — compare
+with CR stripped. HIP FP64 output differs from the CPU references on 4 of
+10 inputs (239_1, 251_1, 279_1, 320_1) at a handful of frequency bins
+(different LM endpoint, e.g. one line of 373 on 239_1) — pre-existing
+ULP-level libm differences (ROCm device libs vs CPU/CUDA), byte-identical
+to the earlier validated HIP FP64 campaign runs (fp32-test/runs/hip_fp64),
+and unchanged by this work. The other 6 inputs are line-identical to the
+CPU references.
