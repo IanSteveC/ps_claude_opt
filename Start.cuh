@@ -40,6 +40,12 @@ extern "C" __global__ void CudaCalculateIter1Mrqcof1CurveM12I0IA0(int lpoints);
 extern "C" __global__ void CudaCalculateIter1Mrqcof1CurveM12I0IA1(int lpoints);
 
 extern "C" __global__ void CudaCalculateIter1Mrqcof1CurveM12I1IA0(int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve1Mid(const int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof2Curve1Mid(const int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve2MidI1IA0(const int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve2MidI1IA1(const int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof2Curve2MidI1IA0(const int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof2Curve2MidI1IA1(const int lpoints);
 
 extern "C" __global__ void CudaCalculateIter1Mrqcof1CurveM12I1IA1(int lpoints);
 
