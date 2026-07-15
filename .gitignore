@@ -31,7 +31,8 @@ hip/*.prehip
 hip/period_search_BOINC_rocm_claude
 hip/period_search_BOINC_rocm_claude.0.*
 hip/*.hipv4-amdgcn*
-hip/modbuild/
+hip/modbuild/*
+!hip/modbuild/bin2c.py
 hip/build_win_hip/
 hip/objwin/
 hip/period_search_BOINC_hip_claude_win64.exe

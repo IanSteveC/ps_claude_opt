@@ -62,6 +62,7 @@ typedef void (*hipStreamCallback_t)(hipStream_t, hipError_t, void*);
 #define hipDeviceAttributeMaxSharedMemoryPerMultiprocessor  10002
 #define hipDeviceAttributeComputeCapabilityMajor            23
 #define hipDeviceAttributeComputeCapabilityMinor            61
+#define hipDeviceAttributeWarpSize                          87
 
 /* ---- the amdhip64 C ABI this host uses, one X-macro list ----
  * PS_HIP_API(_) expands _(ret, name, (paramtypes)) per function. */
