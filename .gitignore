@@ -37,3 +37,7 @@ hip/objwin/
 hip/period_search_BOINC_hip_claude_win64.exe
 hip/build_win_hip.log
 hip/period_search_BOINC_hip_claude_fp32
+hip/runs/
+hip/obj_allarch/
+hip/period_search_BOINC_rocm_claude_allarch
+hip/period_search_BOINC_rocm_claude_allarch.0.*

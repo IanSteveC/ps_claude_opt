@@ -2267,8 +2267,18 @@ struct c1share
 struct c2share
 {
   mreal T[CURVE2_K][DYT_STRIDE];
+#if PS_TILE_PRODUCTS_UNIFORM
+  /* the uniform form reads all K per-point scalars from LDS. The shuffle
+     form instead keeps them in per-lane registers (lane p owns point p's
+     scalars) and broadcasts over the same ds_bpermute path the tile
+     products already ride - values and summation order are unchanged.
+     Dropping the two arrays makes c2share exactly 4096 B/warp = 16384 B
+     per 128-thread block, which lifts the LDS occupancy cap of the
+     Curve2Mid kernels from 3 to 4 workgroups/CU on 64 KB-LDS parts
+     (gfx906: 6 -> 8 resident waves/CU). */
   mreal s2w[CURVE2_K];
   mreal dws[CURVE2_K];
+#endif
 };
 
 union mrqshare
@@ -2646,8 +2656,10 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 						  c2share * __restrict__ shw)
 {
   mreal (* __restrict__ T)[DYT_STRIDE] = shw->T;
+#if PS_TILE_PRODUCTS_UNIFORM
   mreal * __restrict__ s2w = shw->s2w;
   mreal * __restrict__ dws = shw->dws;
+#endif
 
   int tid = threadIdx.x;
   int ma = CUDA_ma;
@@ -2663,6 +2675,12 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 
   int j1 = tid;        /* staged dyda index: T[p][j] == original dyda[j] == row j+1 */
   int j2 = 32 + tid;
+
+#if !PS_TILE_PRODUCTS_UNIFORM
+  /* lane p holds point p's scalars (== the former s2w[p]/dws[p] LDS slots);
+     lanes >= CURVE2_K keep 0.0, matching the old (tid < CURVE2_K) guards */
+  mreal s2w_own = 0.0, dws_own = 0.0;
+#endif
 
 #pragma unroll 1
   for(int jp0 = 0; jp0 < lpoints; jp0 += CURVE2_K)
@@ -2724,11 +2742,19 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	      s2wv = sig2i * wght;
 	      ltrial += dyv * dyv * s2wv;
 	    }
+#if PS_TILE_PRODUCTS_UNIFORM
 	  if(tid == 0)
 	    {
 	      s2w[p] = s2wv;
 	      dws[p] = dyv * s2wv;
 	    }
+#else
+	  if(tid == p)
+	    {
+	      s2w_own = s2wv;
+	      dws_own = dyv * s2wv;
+	    }
+#endif
 	}
       __syncwarp();
 
@@ -2752,7 +2778,7 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 #else
 	  /* lane p computes T[p][l]*s2w[p]; everyone gets all K via shuffle
 	     (integer pipe) instead of K uniform multiplies on the FP64 pipe */
-	  mreal wown = (tid < CURVE2_K) ? T[tid][l] * s2w[tid] : 0.0;
+	  mreal wown = (tid < CURVE2_K) ? T[tid][l] * s2w_own : 0.0;
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
 	    w[p] = __shfl_sync(0xffffffff, wown, p);
@@ -2788,7 +2814,7 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 #else
 	  {
 	    /* products lane-parallel, summed in lane 0 in ascending p order */
-	    mreal bown = (tid < CURVE2_K) ? dws[tid] * T[tid][l] : 0.0;
+	    mreal bown = (tid < CURVE2_K) ? dws_own * T[tid][l] : 0.0;
 	    mreal b = 0.0;
 #pragma unroll
 	    for(int p = 0; p < CURVE2_K; p++)
@@ -2806,9 +2832,23 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 	{
 	  if(!CUDA_ia[l + 1]) continue;
 	  mreal w[CURVE2_K];
+#if PS_TILE_PRODUCTS_UNIFORM
 #pragma unroll
 	  for(int p = 0; p < CURVE2_K; p++)
 	    w[p] = T[p][l] * s2w[p];
+#else
+	  /* broadcast the register-held scalars; executed by the full warp
+	     (shuffles may not sit inside the tid==0 branch below). Values and
+	     per-lane products are identical to the former LDS reads. */
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    w[p] = T[p][l] * __shfl_sync(0xffffffff, s2w_own, p);
+	  mreal bown = (tid < CURVE2_K) ? dws_own * T[tid][l] : 0.0;
+	  mreal btail = 0.0;
+#pragma unroll
+	  for(int p = 0; p < CURVE2_K; p++)
+	    btail += __shfl_sync(0xffffffff, bown, p);
+#endif
 #pragma unroll 1
 	  for(int xx = tid; xx < lastone; xx += 32)
 	    {
@@ -2835,11 +2875,16 @@ __device__ void __forceinline__ mrqcof_curve2_opt(freq_context * __restrict__ CU
 		      pos++;
 		    }
 		}
+#if PS_TILE_PRODUCTS_UNIFORM
 	      mreal b = 0.0;
 #pragma unroll
 	      for(int p = 0; p < CURVE2_K; p++)
 		b += dws[p] * T[p][l];
 	      __stwb(&beta[l], __ldca(&beta[l]) + b);
+#else
+	      /* same products, same ascending-p order, summed via btail */
+	      __stwb(&beta[l], __ldca(&beta[l]) + btail);
+#endif
 	    }
 	}
       __syncwarp();
