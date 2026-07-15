@@ -2608,6 +2608,20 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
    the per-pair terms across the halves before accumulating. */
 #define GEO_BATCH_W64 32
 
+/* full-wave (width-64) cross-half exchange; mreal-aware because the plain
+   __shfl_xor builtin has no df64 overload (mreal.h only wraps the width-32
+   _sync forms) */
+__device__ __forceinline__ double ps_w64_xchg(double v)
+{
+  return __shfl_xor(v, 32, 64);
+}
+#ifdef PS_FP32
+__device__ __forceinline__ df64 ps_w64_xchg(df64 v)
+{
+  return df64(__shfl_xor(v.hi, 32, 64), __shfl_xor(v.lo, 32, 64));
+}
+#endif
+
 struct c1share_w64
 {
   mreal wcA[2][32]; /* compacted weights, point A, per half-wave */
@@ -2892,12 +2906,12 @@ __device__ void __forceinline__ mrqcof_curve1_opt_w64(freq_context * __restrict_
 	 the halves (full-wave shuffles, every lane active) and accumulate in
 	 the 32-lane form's strict point order jp4, jp4+1, jp4+2, jp4+3 */
       {
-	mreal v1Ao = __shfl_xor(v1A, 32, 64);
-	mreal v2Ao = __shfl_xor(v2A, 32, 64);
-	mreal ymAo = __shfl_xor(ymodA, 32, 64);
-	mreal v1Bo = __shfl_xor(v1B, 32, 64);
-	mreal v2Bo = __shfl_xor(v2B, 32, 64);
-	mreal ymBo = __shfl_xor(ymodB, 32, 64);
+	mreal v1Ao = ps_w64_xchg(v1A);
+	mreal v2Ao = ps_w64_xchg(v2A);
+	mreal ymAo = ps_w64_xchg(ymodA);
+	mreal v1Bo = ps_w64_xchg(v1B);
+	mreal v2Bo = ps_w64_xchg(v2B);
+	mreal ymBo = ps_w64_xchg(ymodB);
 
 	/* p1/p2 = first/second pair of this wave iteration */
 	mreal v1p1A = half ? v1Ao : v1A, v1p1B = half ? v1Bo : v1B;
