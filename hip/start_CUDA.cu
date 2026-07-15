@@ -108,6 +108,19 @@ void myinit(void)
 
 int CUDA_grid_dim;
 int g_smCount = 80; /* set from deviceProp in CUDAPrepare */
+int g_warpSize = 32; /* runtime device warp size; 64 on gfx9/CDNA selects the
+			wave64 curve1 kernels (one wave per bid) */
+
+/* Curve1Mid kernel selection: the wave64 form gives a whole physical wave to
+   one bid (no cross-bid divergence, ~half the per-lane register state); the
+   (32,4) form is used on wave32 (RDNA) devices. Grid x doubles for W64 so the
+   bid coverage (gridDim.x * blockDim.y) is unchanged. Outputs are
+   byte-identical between the two forms. */
+#define PS_LAUNCH_C1MID(KER, grid4, blk4, stream, lp) \
+  do { if(g_warpSize == 64) \
+	 PS_LAUNCH(KER##W64, (grid4) * 2, dim3(64, PS_W64_BLOCKY, 1), 0, stream, lp); \
+       else \
+	 PS_LAUNCH(KER, grid4, blk4, 0, stream, lp); } while(0)
 extern int Nfactor; // default 1, usage: --N number  where number is 2 - 16
 hipStream_t stream1;
 hipStream_t stream2;
@@ -269,6 +282,11 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
     hipDeviceGetAttribute(&ccMin, hipDeviceAttributeComputeCapabilityMinor, cudadev);
     size_t freeB = 0, totB = 0; hipMemGetInfo(&freeB, &totB);
     g_smCount = mpc;
+    {
+      int ws = 0;
+      if(hipDeviceGetAttribute(&ws, hipDeviceAttributeWarpSize, cudadev) == hipSuccess && ws > 0)
+	g_warpSize = ws;
+    }
     if(!checkex)
       {
         fprintf(stderr, "Compute units (CUs) per task: %d\n\n", mpc);
@@ -336,6 +354,8 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
 
   CUDA_grid_dim = N_BLOCKS; //3072; //N_BLOCKS; //Nfactor * deviceProp.multiProcessorCount * smxBlock;
   g_smCount = deviceProp.multiProcessorCount;
+  if(deviceProp.warpSize > 0)
+    g_warpSize = deviceProp.warpSize;
 #endif /* !PS_HIP_WIN */
 
   if(!checkex)
@@ -669,11 +689,11 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  if(in_rel[iC])
 		    if(ia[1])
 		      {
-			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA1, pdim4, pblock4, 0, stream3, l_points[iC]); }
+			{ PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof1Curve1Mid, pdim4, pblock4, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA1, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		    else
 		      {
-			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA0, pdim4, pblock4, 0, stream3, l_points[iC]); }
+			{ PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof1Curve1Mid, pdim4, pblock4, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA0, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		  else
 		    if(ia[1])
@@ -726,11 +746,11 @@ int CUDAPrecalc(int cudadev, double freq_start, double freq_end, double freq_ste
 		  if(in_rel[iC])
 		    if(ia[1])
 		      {
-			{ PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA1, pdim4, pblock4, 0, stream3, l_points[iC]); }
+			{ PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof2Curve1Mid, pdim4, pblock4, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA1, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		    else
 		      {
-			{ PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, pdim4, pblock4, 0, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA0, pdim4, pblock4, 0, stream3, l_points[iC]); }
+			{ PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof2Curve1Mid, pdim4, pblock4, stream3, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA0, pdim4, pblock4, 0, stream3, l_points[iC]); }
 		      }
 		  else
 		    if(ia[1])
@@ -1086,11 +1106,11 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 		  if(in_rel[iC])
 		    if(ia[1])
 		      {
-			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
+			{ PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof1Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		      }
 		    else
 		      {
-			{ PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
+			{ PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof1Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof1Curve2MidI1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		      }
 		  else
 		    if(ia[1])
@@ -1143,9 +1163,9 @@ int CUDAStart(int cudadev, int n_start_from, double freq_start, double freq_end,
 		  sched_yield();
 		  if(in_rel[iC])
 		    if(ia[1])
-		      { PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
+		      { PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof2Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		    else
-		      { PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
+		      { PS_LAUNCH_C1MID(CudaCalculateIter1Mrqcof2Curve1Mid, CUDA_grid_dim/BLOCKX4, block4, stream1, l_points[iC]); PS_LAUNCH(CudaCalculateIter1Mrqcof2Curve2MidI1IA0, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]); }
 		  else
 		    if(ia[1])
 		      PS_LAUNCH(CudaCalculateIter1Mrqcof2CurveM12I0IA1, CUDA_grid_dim/BLOCKX4, block4, 0, stream1, l_points[iC]);

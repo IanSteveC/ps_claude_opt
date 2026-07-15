@@ -8,6 +8,10 @@
 #define BLOCKX16 16
 #define BLOCKX32 32
 
+/* wave64 curve1 kernels: block (64, PS_W64_BLOCKY) - one wave64 per bid,
+   two bids per 128-thread block (see mrqcof_curve1_opt_w64 in Start.cu) */
+#define PS_W64_BLOCKY 2
+
 #define blockIdx() (blockIdx.x + gridDim.x * threadIdx.y) 
 
 #ifndef PS_HIP_MODULE /* device declarations - meaningless to the host-only module build */

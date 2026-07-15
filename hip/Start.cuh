@@ -48,6 +48,10 @@ extern "C" __global__ void CudaCalculateIter1Mrqcof1CurveM12I1IA1(int lpoints);
 
 extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve1Mid(const int lpoints);
 extern "C" __global__ void CudaCalculateIter1Mrqcof2Curve1Mid(const int lpoints);
+/* wave64 forms: one wave per bid, block (64, PS_W64_BLOCKY); launched instead
+   of the two above when the device warp size is 64 (gfx9/CDNA) */
+extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve1MidW64(const int lpoints);
+extern "C" __global__ void CudaCalculateIter1Mrqcof2Curve1MidW64(const int lpoints);
 extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve2MidI1IA0(const int lpoints);
 extern "C" __global__ void CudaCalculateIter1Mrqcof1Curve2MidI1IA1(const int lpoints);
 extern "C" __global__ void CudaCalculateIter1Mrqcof2Curve2MidI1IA0(const int lpoints);

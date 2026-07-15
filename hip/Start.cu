@@ -2562,6 +2562,397 @@ __device__ void __forceinline__ mrqcof_curve1_opt(freq_context * __restrict__ CU
   __syncwarp();
 }
 
+/* ---- wave64 form of mrqcof_curve1_opt (gfx906/CDNA) -------------------------
+   On wave64 hardware the (32,4) layout packs TWO bids' logical warps into one
+   physical wave; any control-flow difference between those bids (visible-facet
+   counts, convergence state) serializes the halves, and every 32-lane DP op
+   still occupies the full wave-issue slot. This variant gives the whole wave64
+   to ONE bid: lanes 0-31 process point A exactly as the 32-lane form does, and
+   lanes 32-63 process point B in the formerly divergence-prone upper half. Both
+   halves share trip counts by construction, so the wave never diverges on
+   workload, and per-lane register state nearly halves (6 sum accumulators
+   instead of 12, one acc pair instead of two).
+
+   BIT-IDENTITY: every per-point value is computed by the same expressions in
+   the same order as the 32-lane form. The union facet compaction stores the
+   same (possibly zero) dbr weights; the gather accumulates the same w*row[c]
+   terms in the same j order; the 32-wide butterfly reduction runs unchanged
+   within each half (ps_shfl_* are width-32-pinned). The only cross-point
+   arithmetic - the pair-sequential lave/dave sums - is kept in A-then-B order
+   by exchanging the per-point terms across the halves before accumulating.
+   Validated byte-identical over the 10-input suite against the (32,4) form. */
+/* All gfx9-class targets (GCN Vega, CDNA) are wave64-only; RDNA (gfx10+)
+   compiles wave32 here. ROCm 7.x removed __AMDGCN_WAVEFRONT_SIZE__, so gate
+   on the explicit arch list. The host launches the W64 kernels only when the
+   device reports warpSize == 64, which is exactly this set today; the #else
+   trap below turns a future mismatch into a loud failure instead of a
+   silently-empty kernel. */
+#if defined(__gfx900__) || defined(__gfx902__) || defined(__gfx904__) || \
+    defined(__gfx906__) || defined(__gfx908__) || defined(__gfx909__) || \
+    defined(__gfx90a__) || defined(__gfx90c__) || defined(__gfx940__) || \
+    defined(__gfx941__) || defined(__gfx942__) || defined(__gfx950__)
+#define PS_W64_CURVE1 1
+#else
+#define PS_W64_CURVE1 0
+#endif
+
+#if PS_W64_CURVE1
+/* Two point-pairs per wave64: the lower half-wave runs the paired-points body
+   on (jp, jp+1) and the upper half on (jp+2, jp+3) of the SAME bid, each with
+   its own compaction arrays. Per half-wave the instruction stream, memory
+   pattern, and FMA:load ratio are exactly the (32,4) form's; what changes is
+   only who shares the physical wave - adjacent pairs of one bid (highly
+   correlated control flow, so the halves rarely diverge) instead of two bids
+   480 apart (uncorrelated visible-facet counts and convergence state).
+   The pair-sequential lave/dave sums are kept in point order by exchanging
+   the per-pair terms across the halves before accumulating. */
+#define GEO_BATCH_W64 32
+
+struct c1share_w64
+{
+  mreal wcA[2][32]; /* compacted weights, point A, per half-wave */
+  mreal wcB[2][32]; /* compacted weights, point B, per half-wave */
+  int    fc[2][32];  /* compacted facet indices (A/B union), per half-wave */
+  mreal geo[GEO_BATCH_W64][26];
+  mreal inv[11];
+};
+
+__device__ void __forceinline__ mrqcof_curve1_opt_w64(freq_context * __restrict__ CUDA_LCC,
+						      mreal const * __restrict__ a,
+						      int Lpoints, int bid,
+						      c1share_w64 * __restrict__ shw)
+{
+  int lane = threadIdx.x;    /* 0..63: one wave64 = one bid, two point-pairs */
+  int tid  = lane & 31;      /* lane within my half-wave (as the 32-lane form) */
+  int half = lane >> 5;      /* 0 = pair (jp, jp+1), 1 = pair (jp+2, jp+3) */
+
+  mreal * __restrict__ wcA = shw->wcA[half];
+  mreal * __restrict__ wcB = shw->wcB[half];
+  int    * __restrict__ fc = shw->fc[half];
+  mreal * __restrict__ inv = shw->inv;
+
+  int nc = CUDA_ncoef0;
+  int ma = CUDA_ma;
+  int nshape = nc - 3;      /* last shape-coefficient column */
+  int nf = CUDA_Numfac;
+  int lnp0 = npg[0][bid];
+
+  if(lane == 0)
+    {
+      inv[0] = a[nc + 0];
+      inv[1] = a[nc + 1];
+      mreal r = __drcp_rn(a[nc + 2]);
+      inv[2] = r;
+      inv[3] = a[nc + 3];
+      inv[4] = r * r;
+      inv[5] = exp(a[ma - 1]); /* Lambert */
+      inv[6] = a[ma];          /* Lommel-Seeliger */
+      mreal4 dsc = SCBLmat[bid];
+      inv[7] = dsc.x;   /* Blmat02 */
+      inv[8] = dsc.y;   /* Blmat22 */
+      inv[9] = dsc.z;   /* Blmat10 */
+      inv[10] = dsc.w;  /* Blmat11 */
+    }
+  __syncwarp();
+
+  int c1 = 2 + tid;        /* parameter columns owned by this lane */
+  int c2 = 34 + tid;
+  mreal dave1 = 0, dave2 = 0;
+  mreal lave = 0;
+
+  mreal const * __restrict__ areap = &(Areag[bid][0]);
+  mreal * __restrict__ dytemp = CUDA_LCC->dytemp;
+  mreal * __restrict__ ytemp = CUDA_LCC->ytemp;
+
+#pragma unroll 1
+  for(int jp0 = 0; jp0 < Lpoints; jp0 += GEO_BATCH_W64)
+    {
+      int nb = Lpoints - jp0;
+      if(nb > GEO_BATCH_W64) nb = GEO_BATCH_W64;
+
+      /* one lane = one point (lanes 0..nb-1 of the wave) */
+      if(lane < nb)
+	curve1_point_geometry(lnp0 + jp0 + lane, inv, shw->geo[lane]);
+      __syncwarp();
+
+#pragma unroll 1
+  for(int jp4 = jp0; jp4 < jp0 + nb; jp4 += 4)
+    {
+      /* my half's pair base; the flags are wave-uniform in jp4/nb, so both
+	 halves run every iteration (keeps the cross-half shuffles full-wave) */
+      int jp = jp4 + 2 * half;
+      int haveA = (jp < jp0 + nb);          /* upper half's pair may not exist */
+      int haveB = (jp + 1 < jp0 + nb);
+      int geoA = haveA ? (jp - jp0) : 0;    /* park missing points on geo[0]: */
+      int geoB = haveB ? (jp + 1 - jp0) : geoA; /* defined values, outputs gated */
+      mreal const * __restrict__ ptA = shw->geo[geoA];
+      mreal const * __restrict__ ptB = shw->geo[geoB];
+
+      mreal brA = 0, t1A = 0, t2A = 0, t3A = 0, t4A = 0, t5A = 0;
+      mreal brB = 0, t1B = 0, t2B = 0, t3B = 0, t4B = 0, t5B = 0;
+      mreal accA1 = 0, accA2 = 0, accB1 = 0, accB2 = 0;
+
+#pragma unroll 1
+      for(int f0 = 0; f0 < nf; f0 += 32)
+	{
+	  int i = f0 + tid;
+	  mreal dbrA = 0.0, dbrB = 0.0;
+	  if(i < nf)
+	    {
+	      mreal n0 = CUDA_Nor[0][i], n1 = CUDA_Nor[1][i], n2 = CUDA_Nor[2][i];
+	      mreal ar = __ldca(&areap[i]);
+	      mreal cl = inv[5], cls = inv[6];
+
+	      {
+		mreal lmu  = ptA[16] * n0 + ptA[17] * n1 + ptA[18] * n2;
+		mreal lmu0 = ptA[19] * n0 + ptA[20] * n1 + ptA[21] * n2;
+		if((lmu > TINY) && (lmu0 > TINY))
+		  {
+		    mreal dnom = lmu + lmu0;
+		    mreal dnom_1 = __drcp_rn(dnom);
+		    mreal s = lmu * lmu0 * (cl + cls * dnom_1);
+		    brA += ar * s;
+		    dbrA = ar * s;   /* == (Darea*s) * g : the g-fold */
+		    mreal lmu0_dnom = lmu0 * dnom_1;
+		    mreal lmu_dnom  = lmu * dnom_1;
+		    mreal dsmu  = cls * (lmu0_dnom * lmu0_dnom) + cl * lmu0;
+		    mreal dsmu0 = cls * (lmu_dnom * lmu_dnom) + cl * lmu;
+
+		    mreal sum1  = n0 * ptA[0] + n1 * ptA[1] + n2 * ptA[2];
+		    mreal sum10 = n0 * ptA[3] + n1 * ptA[4] + n2 * ptA[5];
+		    mreal sum2  = n0 * ptA[6] + n1 * ptA[7] + n2 * ptA[8];
+		    mreal sum20 = n0 * ptA[9] + n1 * ptA[10] + n2 * ptA[11];
+		    mreal sum3  = n0 * ptA[12] + n1 * ptA[13];
+		    mreal sum30 = n0 * ptA[14] + n1 * ptA[15];
+
+		    t1A += ar * (dsmu * sum1 + dsmu0 * sum10);
+		    t2A += ar * (dsmu * sum2 + dsmu0 * sum20);
+		    t3A += ar * (dsmu * sum3 + dsmu0 * sum30);
+		    t4A += ar * lmu * lmu0;
+		    t5A += ar * lmu * lmu0 * dnom_1;
+		  }
+	      }
+	      if(haveB)
+		{
+		  mreal lmu  = ptB[16] * n0 + ptB[17] * n1 + ptB[18] * n2;
+		  mreal lmu0 = ptB[19] * n0 + ptB[20] * n1 + ptB[21] * n2;
+		  if((lmu > TINY) && (lmu0 > TINY))
+		    {
+		      mreal dnom = lmu + lmu0;
+		      mreal dnom_1 = __drcp_rn(dnom);
+		      mreal s = lmu * lmu0 * (cl + cls * dnom_1);
+		      brB += ar * s;
+		      dbrB = ar * s;
+		      mreal lmu0_dnom = lmu0 * dnom_1;
+		      mreal lmu_dnom  = lmu * dnom_1;
+		      mreal dsmu  = cls * (lmu0_dnom * lmu0_dnom) + cl * lmu0;
+		      mreal dsmu0 = cls * (lmu_dnom * lmu_dnom) + cl * lmu;
+
+		      mreal sum1  = n0 * ptB[0] + n1 * ptB[1] + n2 * ptB[2];
+		      mreal sum10 = n0 * ptB[3] + n1 * ptB[4] + n2 * ptB[5];
+		      mreal sum2  = n0 * ptB[6] + n1 * ptB[7] + n2 * ptB[8];
+		      mreal sum20 = n0 * ptB[9] + n1 * ptB[10] + n2 * ptB[11];
+		      mreal sum3  = n0 * ptB[12] + n1 * ptB[13];
+		      mreal sum30 = n0 * ptB[14] + n1 * ptB[15];
+
+		      t1B += ar * (dsmu * sum1 + dsmu0 * sum10);
+		      t2B += ar * (dsmu * sum2 + dsmu0 * sum20);
+		      t3B += ar * (dsmu * sum3 + dsmu0 * sum30);
+		      t4B += ar * lmu * lmu0;
+		      t5B += ar * lmu * lmu0 * dnom_1;
+		    }
+		}
+	    }
+
+	  /* union-compact per half-wave: one row load will serve both points.
+	     __ballot_sync maps to the 32-bit half-wave ballot on wave64. */
+	  unsigned vis = __ballot_sync(0xffffffff, (dbrA != 0.0) || (dbrB != 0.0));
+	  int cnt = __popc(vis);
+	  if((dbrA != 0.0) || (dbrB != 0.0))
+	    {
+	      int pos = __popc(vis & ((1u << tid) - 1u));
+	      wcA[pos] = dbrA;
+	      wcB[pos] = dbrB;
+	      fc[pos] = f0 + tid;
+	    }
+	  __syncwarp();
+
+#pragma unroll 4
+	  for(int j = 0; j < cnt; j++)
+	    {
+	      mreal wA = wcA[j];
+	      mreal wB = wcB[j];
+	      mreal const * __restrict__ row = CUDA_DsphT[fc[j]];
+	      mreal v1 = row[c1];
+	      accA1 += wA * v1;
+	      accB1 += wB * v1;
+	      if(c2 <= nshape)
+		{
+		  mreal v2 = row[c2];
+		  accA2 += wA * v2;
+		  accB2 += wB * v2;
+		}
+	    }
+	  __syncwarp();
+	}
+
+      /* butterfly-reduce both points' sums within my half-wave (width-32) */
+#pragma unroll
+      for(int off = 16; off > 0; off >>= 1)
+	{
+	  brA += __shfl_xor_sync(0xffffffff, brA, off);
+	  t1A += __shfl_xor_sync(0xffffffff, t1A, off);
+	  t2A += __shfl_xor_sync(0xffffffff, t2A, off);
+	  t3A += __shfl_xor_sync(0xffffffff, t3A, off);
+	  t4A += __shfl_xor_sync(0xffffffff, t4A, off);
+	  t5A += __shfl_xor_sync(0xffffffff, t5A, off);
+	  brB += __shfl_xor_sync(0xffffffff, brB, off);
+	  t1B += __shfl_xor_sync(0xffffffff, t1B, off);
+	  t2B += __shfl_xor_sync(0xffffffff, t2B, off);
+	  t3B += __shfl_xor_sync(0xffffffff, t3B, off);
+	  t4B += __shfl_xor_sync(0xffffffff, t4B, off);
+	  t5B += __shfl_xor_sync(0xffffffff, t5B, off);
+	}
+
+      mreal v1A, v2A, ymodA;
+      /* point A of my pair: one dytempT row, lanes = parameters */
+      {
+	mreal scale = ptA[22], ff = ptA[23], d2 = ptA[24], alph = ptA[25];
+	mreal cl = inv[5];
+	mreal ymod = brA * scale;
+
+	mreal v1, v2;
+	if(c1 <= nshape)            v1 = scale * accA1;
+	else if(c1 == nshape + 1)   v1 = scale * t1A;
+	else if(c1 == nshape + 2)   v1 = scale * t2A;
+	else if(c1 == nshape + 3)   v1 = scale * t3A;
+	else if(c1 == nc + 1)       v1 = brA * ff;
+	else if(c1 == nc + 2)       v1 = brA * d2;
+	else if(c1 == nc + 3)       v1 = brA * alph;
+	else if(c1 == ma - 1)       v1 = scale * t4A * cl;
+	else                        v1 = scale * t5A; /* c1 == ma */
+	if(c2 <= nshape)            v2 = scale * accA2;
+	else if(c2 == nshape + 1)   v2 = scale * t1A;
+	else if(c2 == nshape + 2)   v2 = scale * t2A;
+	else if(c2 == nshape + 3)   v2 = scale * t3A;
+	else if(c2 == nc + 1)       v2 = brA * ff;
+	else if(c2 == nc + 2)       v2 = brA * d2;
+	else if(c2 == nc + 3)       v2 = brA * alph;
+	else if(c2 == ma - 1)       v2 = scale * t4A * cl;
+	else                        v2 = scale * t5A; /* c2 == ma */
+
+	if(haveA)
+	  {
+	    mreal * __restrict__ row = dytemp + (size_t)jp * DYT_STRIDE;
+	    if(c1 <= ma) row[c1] = v1;
+	    if(c2 <= ma) row[c2] = v2;
+	    if(tid == 0) ytemp[jp] = ymod;
+	  }
+	v1A = v1; v2A = v2; ymodA = ymod;
+      }
+
+      mreal v1B, v2B, ymodB;
+      /* point B of my pair */
+      {
+	mreal scale = ptB[22], ff = ptB[23], d2 = ptB[24], alph = ptB[25];
+	mreal cl = inv[5];
+	mreal ymod = brB * scale;
+
+	mreal v1, v2;
+	if(c1 <= nshape)            v1 = scale * accB1;
+	else if(c1 == nshape + 1)   v1 = scale * t1B;
+	else if(c1 == nshape + 2)   v1 = scale * t2B;
+	else if(c1 == nshape + 3)   v1 = scale * t3B;
+	else if(c1 == nc + 1)       v1 = brB * ff;
+	else if(c1 == nc + 2)       v1 = brB * d2;
+	else if(c1 == nc + 3)       v1 = brB * alph;
+	else if(c1 == ma - 1)       v1 = scale * t4B * cl;
+	else                        v1 = scale * t5B; /* c1 == ma */
+	if(c2 <= nshape)            v2 = scale * accB2;
+	else if(c2 == nshape + 1)   v2 = scale * t1B;
+	else if(c2 == nshape + 2)   v2 = scale * t2B;
+	else if(c2 == nshape + 3)   v2 = scale * t3B;
+	else if(c2 == nc + 1)       v2 = brB * ff;
+	else if(c2 == nc + 2)       v2 = brB * d2;
+	else if(c2 == nc + 3)       v2 = brB * alph;
+	else if(c2 == ma - 1)       v2 = scale * t4B * cl;
+	else                        v2 = scale * t5B; /* c2 == ma */
+
+	if(haveB)
+	  {
+	    mreal * __restrict__ row = dytemp + (size_t)(jp + 1) * DYT_STRIDE;
+	    if(c1 <= ma) row[c1] = v1;
+	    if(c2 <= ma) row[c2] = v2;
+	    if(tid == 0) ytemp[jp + 1] = ymod;
+	  }
+	v1B = v1; v2B = v2; ymodB = ymod;
+      }
+
+      /* pair-sequential shared sums: exchange the other pair's terms across
+	 the halves (full-wave shuffles, every lane active) and accumulate in
+	 the 32-lane form's strict point order jp4, jp4+1, jp4+2, jp4+3 */
+      {
+	mreal v1Ao = __shfl_xor(v1A, 32, 64);
+	mreal v2Ao = __shfl_xor(v2A, 32, 64);
+	mreal ymAo = __shfl_xor(ymodA, 32, 64);
+	mreal v1Bo = __shfl_xor(v1B, 32, 64);
+	mreal v2Bo = __shfl_xor(v2B, 32, 64);
+	mreal ymBo = __shfl_xor(ymodB, 32, 64);
+
+	/* p1/p2 = first/second pair of this wave iteration */
+	mreal v1p1A = half ? v1Ao : v1A, v1p1B = half ? v1Bo : v1B;
+	mreal v1p2A = half ? v1A : v1Ao, v1p2B = half ? v1B : v1Bo;
+	mreal v2p1A = half ? v2Ao : v2A, v2p1B = half ? v2Bo : v2B;
+	mreal v2p2A = half ? v2A : v2Ao, v2p2B = half ? v2B : v2Bo;
+	mreal ymp1A = half ? ymAo : ymodA, ymp1B = half ? ymBo : ymodB;
+	mreal ymp2A = half ? ymodA : ymAo, ymp2B = half ? ymodB : ymBo;
+
+	/* existence flags, uniform across the wave */
+	int haveP1B = (jp4 + 1 < jp0 + nb);
+	int haveP2A = (jp4 + 2 < jp0 + nb);
+	int haveP2B = (jp4 + 3 < jp0 + nb);
+
+	if(c1 <= ma)
+	  {
+	    dave1 += v1p1A;
+	    if(haveP1B) dave1 += v1p1B;
+	    if(haveP2A) dave1 += v1p2A;
+	    if(haveP2B) dave1 += v1p2B;
+	  }
+	if(c2 <= ma)
+	  {
+	    dave2 += v2p1A;
+	    if(haveP1B) dave2 += v2p1B;
+	    if(haveP2A) dave2 += v2p2A;
+	    if(haveP2B) dave2 += v2p2B;
+	  }
+	lave += ymp1A;
+	if(haveP1B) lave += ymp1B;
+	if(haveP2A) lave += ymp2A;
+	if(haveP2B) lave += ymp2B;
+      }
+
+      /* wc/fc are re-written next chunk pass and geo at the next batch; make
+	 sure every lane is done reading them (lanes run independently) */
+      __syncwarp();
+    } /* jp4: two pairs per wave */
+    } /* jp0 geometry batch */
+
+  /* both halves hold identical dave/lave; store from the lower half only */
+  if(!half)
+    {
+      if(c1 <= ma) dave[bid][c1 - 1] = dave1;
+      if(c2 <= ma) dave[bid][c2 - 1] = dave2;
+    }
+  if(lane == 0)
+    {
+      npg[0][bid] = lnp0 + Lpoints;
+      raveg[bid] = __drcp_rn(lave);
+    }
+  __syncwarp();
+}
+#endif /* PS_W64_CURVE1 */
+
 // the 3-point regularization "curve": brightness and derivatives depend only on
 // Areag and Dsph (all rotation/phase derivative columns are zero, as in conv()).
 __device__ void __forceinline__ mrqcof_curve1_last_opt(freq_context * __restrict__ CUDA_LCC,
@@ -5016,6 +5407,42 @@ CudaCalculateIter1Mrqcof2Curve1Mid(const int lpoints)
   if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
   __shared__ c1share shu[BLOCKX4];
   mrqcof_curve1_opt(CUDA_LCC, atry[bid], lpoints, bid, &shu[threadIdx.y]);
+}
+
+/* wave64 Curve1Mid pair: one wave64 per bid, block (64, PS_W64_BLOCKY).
+   The host launches these instead of the (32,4) Curve1Mid kernels when the
+   device's runtime warp size is 64 (gfx9/CDNA); grid.x doubles to keep the
+   bid count. Gating and semantics match the 32-lane wrappers exactly. */
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof1Curve1MidW64(const int lpoints)
+{
+#if PS_W64_CURVE1
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter) | !(flags & isAlambda)) return;
+  __shared__ c1share_w64 shu[PS_W64_BLOCKY];
+  mrqcof_curve1_opt_w64(CUDA_LCC, cgg[bid], lpoints, bid, &shu[threadIdx.y]);
+#else
+  __builtin_trap(); /* launched on a wave64 device this TU wasn't gated for */
+#endif
+}
+
+extern "C" __global__ void
+PS_CURVE_LB
+CudaCalculateIter1Mrqcof2Curve1MidW64(const int lpoints)
+{
+#if PS_W64_CURVE1
+  int bid = blockIdx();
+  auto CUDA_LCC = &CUDA_CC[bid];
+  uint flags = getFlags(bid);
+  if((!!(flags & isInvalid)) | !(flags & isNiter)) return;
+  __shared__ c1share_w64 shu[PS_W64_BLOCKY];
+  mrqcof_curve1_opt_w64(CUDA_LCC, atry[bid], lpoints, bid, &shu[threadIdx.y]);
+#else
+  __builtin_trap(); /* launched on a wave64 device this TU wasn't gated for */
+#endif
 }
 
 extern "C" __global__ void
