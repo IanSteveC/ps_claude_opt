@@ -39,6 +39,9 @@ else
   FPCONTRACT="-ffp-contract=fast"
   APP="period_search_BOINC_rocm_claude"
 fi
+# Optional override for contraction-parity experiments (FP64 build only), e.g.
+# PS_FPCONTRACT=on to restrict clang to within-expression FMA fusion.
+if [ -n "$PS_FPCONTRACT" ]; then FPCONTRACT="-ffp-contract=$PS_FPCONTRACT"; fi
 
 INC="-I. -I.. -I$BOINC_DIR -I$BOINC_DIR/api -I$BOINC_DIR/lib"
 HIPFLAGS="-O3 -std=c++17 -fgpu-rdc $FPCONTRACT $PS_DEFS ${PS_EXTRA_DEFS:-} $OFF $INC"
