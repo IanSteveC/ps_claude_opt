@@ -316,3 +316,72 @@ ULP-level libm differences (ROCm device libs vs CPU/CUDA), byte-identical
 to the earlier validated HIP FP64 campaign runs (fp32-test/runs/hip_fp64),
 and unchanged by this work. The other 6 inputs are line-identical to the
 CPU references.
+
+## 2026-07-15 — gfx906 campaign: profile, LDS shave, wave64 curve1 (−18.3%)
+
+Profiled the FP64 HIP build on the Radeon VII with classic `rocprof`
+(`rocprofv3`'s preload breaks BOINC's timer thread: `pthread_create`
+EINVAL → `boinc_init returned 22`; use `rocprof --stats`). Kernel time
+on input_239_1: **`Mrqcof2Curve1Mid` 75.2%** (34.7 ms/launch),
+`Mrqcof2Curve2MidI1IA0` 20.6%, gauss 2.1%; the `Mrqcof1*` twins are
+~2% combined because the `isAlambda` gate early-exits them on every
+iteration whose previous trial was rejected — the mrqcof2 (trial-
+parameter) instances are the real hot path. GPU busy ≈ wall: no
+launch-gap problem. Occupancy audit via the code-object metadata
+(`llvm-objcopy --dump-section=.hip_fatbin` → `clang-offload-bundler`
+→ `llvm-readelf --notes`; note RDC per-TU objects carry no final
+numbers, dump the linked binary): Curve1Mid 127 VGPR / 16 224 B LDS,
+Curve2Mid 90-93 VGPR / 16 896 B LDS, both 2 waves/SIMD — but Curve2Mid
+was LDS-capped at 3 workgroups/CU = **6 waves/CU, below even its VGPR
+limit of 8**.
+
+Two changes, both validated byte-identical over the 10-input suite
+(and byte-compared per input against the accepted baseline run — the
+lambda/beta/pole bar from the 2026-07-14 incident):
+
+1. **`c2share` LDS shave (`d696ec0`, −2.5%)**: the s2w/dws broadcast
+   arrays (128 B/warp) pushed c2share to 4224 B; lane p now keeps point
+   p's scalars in registers and the tile products broadcast them over
+   the same `ds_bpermute` path they already ride. c2share = exactly
+   4096 B/warp → 16 384 B/block → 4 workgroups/CU (8 waves) on gfx906;
+   RDNA WGPs go 12 → 16 waves; the fused M12 kernels' union shrinks
+   too and their 2-VGPR spill disappears. The uniform product form
+   (CDNA trials) keeps the LDS arrays. Suite 783.3 → 763.6 s.
+
+2. **Wave64 curve1 (`d468ba5`, −16.2%)**: on wave64 the (32,4) blocks
+   pack two *bids'* logical warps into one physical wave, and
+   `blockIdx()` makes those partners 48 frequency steps apart — the
+   compact-gather loop runs max(cntA, cntB) iterations and a converged
+   bid idles its half-wave for the partner's whole tail.
+   `mrqcof_curve1_opt_w64` (gfx9 arch list; host selects by runtime
+   warpSize, block (64,2), grid.x×2) gives the whole wave to ONE bid:
+   lanes 0-31 run the unchanged paired-points body on (jp, jp+1),
+   lanes 32-63 on (jp+2, jp+3), per-half wcA/wcB/fc. lave/dave stay in
+   strict point order via a cross-half `__shfl_xor(v,32,64)` exchange —
+   every value rounds identically. GEO_BATCH_W64=32 halves the staging
+   rounds at the same per-point math. Suite 763.6 → **639.7 s**
+   (783.3 → 639.7, −18.3% for the day; per-input 61-68 s vs 71-88 s).
+
+   **Measured dead-end** (do not retry): the "obvious" W64 form — point
+   A in the lower half, point B in the upper, union-compacted — is
+   byte-identical but 9-14% *slower* than (32,4): both halves load the
+   SAME DsphT row values (halving the gather's FMA:load ratio, the
+   very thing two-point pairing bought), and every wave-uniform op
+   runs once per bid instead of once per two bids. The winning form
+   keeps the 32-lane body per half-wave verbatim and only changes who
+   shares the physical wave. Also: ROCm 7 removed
+   `__AMDGCN_WAVEFRONT_SIZE__` — the gate is the explicit gfx9 list,
+   with a `__builtin_trap()` stub on wave32 so a future mismatch fails
+   loudly instead of silently no-opping.
+
+   RDNA (wave32) is untouched — same kernels and launch shapes as
+   before. CDNA (gfx908/90a/94x, wave64) takes the W64 path: same wave
+   structure as gfx906, hardware-untested here (no CDNA in the box);
+   all-7-arch bundle compiles clean.
+
+Rejected after analysis: alpha-in-LDS for curve2 (the 12.8 KB/bid
+triangular working set caps residency at ~3 waves/CU — loses to the
+current 16-bids-in-flight streaming form) and CURVE2_K=16 (halves the
+alpha RMW traffic but changes the rank-K summation order → not
+bit-identical). Curve2Mid (~26% post-change) is the next candidate,
+but only via transforms that keep the per-tile accumulation order.

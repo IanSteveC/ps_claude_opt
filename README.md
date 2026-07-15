@@ -22,6 +22,18 @@ with the full-precision derivative table; a reduced-precision fast path for
 data-center GPUs was removed 2026-07-14 because it cost exact pole
 (lambda/beta) agreement with the CPU reference.
 
+HIP/ROCm (Radeon VII, gfx906), 10-input suite total, FP64 build:
+
+| build | suite total |
+|---|---|
+| 2026-07-14 state | 783 s |
+| + curve2 LDS shave (4 workgroups/CU) | 764 s |
+| + wave64 curve1 (one wave per bid) | **640 s (−18.3%)** |
+
+Both changes are byte-identical on all 10 outputs (lambda/beta/pole exact);
+wave64 (gfx9/CDNA) devices select the new curve1 kernels at runtime, RDNA
+and the CUDA builds are unchanged. See OPTIMIZATION_NOTES.md (2026-07-15).
+
 ## Key changes vs upstream
 
 - One CUDA block per (trial frequency, pole) pair — the 10 pole trials run
