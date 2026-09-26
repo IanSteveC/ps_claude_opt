@@ -16,6 +16,7 @@
 /* one definition per API entry, null until resolved */
 #define PS_HIP_DEF_PTR(ret, name, params) extern "C" ret (*name) params = 0;
 PS_HIP_API(PS_HIP_DEF_PTR)
+PS_HIP_API_OPT(PS_HIP_DEF_PTR)
 #undef PS_HIP_DEF_PTR
 
 #if defined(_WIN32)
@@ -65,6 +66,12 @@ extern "C" int psHipLoadRuntime(void) {
     if (!name) { fprintf(stderr, "[hip] missing symbol: %s\n", #name); ++missing; }
     PS_HIP_API(PS_HIP_RESOLVE)
 #undef PS_HIP_RESOLVE
+
+    /* optional entries: whichever this runtime exports; null is fine */
+#define PS_HIP_RESOLVE_OPT(ret, name, params) \
+    name = (ret (*) params) ps_dlsym(h, #name);
+    PS_HIP_API_OPT(PS_HIP_RESOLVE_OPT)
+#undef PS_HIP_RESOLVE_OPT
 
     if (missing) { fprintf(stderr, "[hip] %d symbols unresolved\n", missing); state = 1; return -1; }
     state = 0; return 0;

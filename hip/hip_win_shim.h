@@ -68,6 +68,8 @@ typedef void (*hipStreamCallback_t)(hipStream_t, hipError_t, void*);
  * PS_HIP_API(_) expands _(ret, name, (paramtypes)) per function. */
 #define PS_HIP_API(_) \
   _(hipError_t,  hipInit,                        (unsigned int)) \
+  _(hipError_t,  hipRuntimeGetVersion,           (int*)) \
+  _(hipError_t,  hipDriverGetVersion,            (int*)) \
   _(hipError_t,  hipDeviceGet,                   (hipDevice_t*, int)) \
   _(hipError_t,  hipDeviceGetName,               (char*, int, hipDevice_t)) \
   _(hipError_t,  hipDeviceGetAttribute,          (int*, hipDeviceAttribute_t, int)) \
@@ -100,9 +102,26 @@ typedef void (*hipStreamCallback_t)(hipStream_t, hipError_t, void*);
   _(hipError_t,  hipEventDestroy,                (hipEvent_t)) \
   _(const char*, hipGetErrorString,              (hipError_t))
 
+/* ---- optional entries: resolved when the runtime exports them, else left
+ * null (the loader does NOT count them as missing). Used for the device's ISA
+ * name, which only hipDeviceProp_t carries: hipGetDevicePropertiesR0600 is the
+ * HIP 6.0+ struct revision, plain hipGetDeviceProperties the HIP 5.x one (kept
+ * exported by 6.x/7.x for old binaries). Both are called with an oversized
+ * zeroed byte buffer and gcnArchName ("gfx906:sramecc+:xnack-") is read at the
+ * revision's fixed offset - the structs hold only char/int/size_t (no long),
+ * so the offsets are identical for MinGW (LLP64) and the MSVC-built DLL. */
+#define PS_HIP_API_OPT(_) \
+  _(hipError_t,  hipGetDevicePropertiesR0600,    (void*, int)) \
+  _(hipError_t,  hipGetDeviceProperties,         (void*, int))
+
+#define PS_HIP_PROP_BUF_BYTES            16384  /* >> sizeof any revision (R0600: 1472, R0000: 792) */
+#define PS_HIP_PROP_R0600_GCNARCHNAME    1160   /* offsetof(hipDeviceProp_tR0600, gcnArchName), ROCm 6.0-7.2 */
+#define PS_HIP_PROP_R0000_GCNARCHNAME    396    /* offsetof(hipDeviceProp_t, gcnArchName), HIP 5.2-5.7 */
+
 /* runtime-resolved function pointers (defined in hip_win_loader.cpp) */
 #define PS_HIP_DECL_PTR(ret, name, params) extern ret (*name) params;
 PS_HIP_API(PS_HIP_DECL_PTR)
+PS_HIP_API_OPT(PS_HIP_DECL_PTR)
 #undef PS_HIP_DECL_PTR
 
 int psHipLoadRuntime(void);   /* 0 on success; LoadLibrary/dlopen + resolve */

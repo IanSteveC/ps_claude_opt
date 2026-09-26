@@ -289,11 +289,33 @@ int CUDAPrepare(int cudadev, double *beta_pole, double *lambda_pole, double *par
     }
     if(!checkex)
       {
+        int rtv = 0, drv = 0;
+        hipRuntimeGetVersion(&rtv); hipDriverGetVersion(&drv);
         fprintf(stderr, "Compute units (CUs) per task: %d\n\n", mpc);
-        fprintf(stderr, "HIP version: %d\n", CUDA_VERSION);
+        fprintf(stderr, "HIP version: %d (driver %d)\n", rtv, drv);
         fprintf(stderr, "HIP Device number: %d\n", cudadev);
         fprintf(stderr, "HIP Device: %s %luMB\n", devname, (unsigned long)(totB / 1048576));
-        fprintf(stderr, "GFX: cc %d.%d\n", ccMaj, ccMin);
+        /* ISA name (gfx906, gfx1030, ...) as the native build prints it: read
+           gcnArchName out of hipDeviceProp_t at the struct revision's fixed
+           offset (see PS_HIP_API_OPT in hip_win_shim.h); cc major.minor only
+           if neither entry point is available. */
+        char gfxname[64]; gfxname[0] = '\0';
+        {
+          static char props[PS_HIP_PROP_BUF_BYTES];
+          const char* an = 0;
+          memset(props, 0, sizeof(props));
+          if(hipGetDevicePropertiesR0600 && hipGetDevicePropertiesR0600(props, cudadev) == hipSuccess)
+            an = props + PS_HIP_PROP_R0600_GCNARCHNAME;
+          else if(hipGetDeviceProperties && hipGetDeviceProperties(props, cudadev) == hipSuccess)
+            an = props + PS_HIP_PROP_R0000_GCNARCHNAME;
+          if(an && strncmp(an, "gfx", 3) == 0)
+            {
+              snprintf(gfxname, sizeof(gfxname), "%s", an);
+              for(char* p = gfxname; *p; p++) if(*p == ':') { *p = '\0'; break; }  /* drop :sramecc+:xnack- */
+            }
+        }
+        if(gfxname[0]) fprintf(stderr, "GFX: %s\n", gfxname);
+        else           fprintf(stderr, "GFX: cc %d.%d\n", ccMaj, ccMin);
         fprintf(stderr, "Shared memory per Block | per SM: %d | %d\n", shBlk, shSM);
       }
   }

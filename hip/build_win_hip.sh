@@ -29,6 +29,15 @@ mkdir -p "$OBJ"
 ARCHS="${ARCHS:-gfx906 gfx908 gfx90a gfx1010 gfx1012 gfx1030 gfx1031 gfx1032 gfx1034 gfx1035 gfx1100 gfx1101 gfx1102 gfx1103 gfx1200 gfx1201}"
 OFF=""; for a in $ARCHS; do OFF="$OFF --offload-arch=$a"; done
 
+# Code object ABI version for the Windows device code. ROCm 7's clang defaults
+# to v6 (ELF EI_ABIVERSION=4), which only HIP 6.3+ runtimes can load. Windows
+# hosts do NOT all carry a current runtime: Vega/Polaris (Radeon VII gfx906)
+# are on AMD's legacy driver branch whose amdhip64.dll is HIP 5.x, and it
+# fails hipModuleLoadData with 303 (hipErrorSharedObjectInitFailed) on a v6
+# object (seen on asteroidsathome host 806437, Sept 2026). v4 loads on every
+# HIP 5.x/6.x/7.x runtime and changes nothing in the kernel code itself.
+PS_COV="${PS_COV:-4}"
+
 CXX="$MINGW-g++"
 CC="$MINGW-gcc"
 
@@ -55,7 +64,7 @@ fi
 
 # 1. multi-arch code object (exact device ISA, host-OS neutral)
 echo "[genco] hipcc --genco (16 arches: $ARCHS)"
-"$HIPCC" --genco $OFF -O3 -std=c++17 $FPCONTRACT $PS_DEFS \
+"$HIPCC" --genco $OFF -O3 -std=c++17 $FPCONTRACT $PS_DEFS -mcode-object-version=$PS_COV \
   -I. -I.. -I"$BOINC_DIR" -I"$BOINC_DIR/api" -I"$BOINC_DIR/lib" \
   -o "$OBJ/ps_hip.co" Start.cu
 
@@ -85,5 +94,9 @@ $CXX -static -static-libgcc -static-libstdc++ $OBJS \
 echo "built: $APP"
 
 echo "[verify] arches embedded:"
-"$ROCM/llvm/bin/llvm-objdump" --offloading "$OBJ/ps_hip.co" 2>/dev/null | grep -oE "gfx[0-9a-z]+" | sort -u | tr '\n' ' '; echo
+"$ROCM/llvm/bin/clang-offload-bundler" --list --type=o --input="$OBJ/ps_hip.co" 2>/dev/null | grep -oE "gfx[0-9a-z]+" | sort -u | tr '\n' ' '; echo
+echo "[verify] gfx906 code object ABI (EI_ABIVERSION 2=v4, 3=v5, 4=v6; must be <=3 for HIP 5.x Windows runtimes):"
+"$ROCM/llvm/bin/clang-offload-bundler" --unbundle --type=o --input="$OBJ/ps_hip.co" \
+  --targets=hipv4-amdgcn-amd-amdhsa--gfx906 --output="$OBJ/ps_hip_gfx906.elf" 2>/dev/null \
+  && "$ROCM/llvm/bin/llvm-readelf" -h "$OBJ/ps_hip_gfx906.elf" | grep -E "ABI Version"
 file "$APP"
