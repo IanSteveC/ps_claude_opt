@@ -2960,19 +2960,7 @@ __device__ void __forceinline__ mrqmin_1_end_opt(freq_context * __restrict__ CUD
       if(piv == 0.0)
 	{
 	  if(tid == 0)
-	    {
-	      /* singular: atry = cgg + compacted da, as in the original err=2 path */
-	      int cnt = 0;
-	      for(int l = 1; l <= ma; l++)
-		{
-		  if(CUDA_ia[l])
-		    {
-		      cnt++;
-		      atry[bid][l] = cgg[bid][l] + das[cnt];
-		    }
-		}
-	      err_s = 2;
-	    }
+	    err_s = 2;
 	  __syncthreads();
 	  break;
 	}
@@ -3018,7 +3006,17 @@ __device__ void __forceinline__ mrqmin_1_end_opt(freq_context * __restrict__ CUD
   __syncthreads();
 
   if(err_s)
-    return;
+    {
+      /* singular (2) or repeated pivot (1): no step. The CPU mrqmin returns
+         before forming atry, so the trial keeps cg; mirror that with
+         atry = cg so mrqcof2 re-evaluates the current point and the step is
+         rejected. The previous code applied the half-eliminated da as a
+         step here ("as in the original err=2 path"), which is not what the
+         CPU does and is what upstream removed in 4631b5f. */
+      for(int n = tid; n < ma; n += 128)
+	atry[bid][n + 1] = cgg[bid][n + 1];
+      return;
+    }
 
   for(int n = tid; n < ma; n += 128)
     {
