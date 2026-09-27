@@ -1829,7 +1829,7 @@ __device__ int __forceinline__ gauss_errc(freq_context * __restrict__ CUDA_LCC, 
 #pragma unroll 1
   for(int i = 1; i <= mf; i++)
     {
-      mreal big = 0.0;
+      mreal big = -1.0;   /* see mrqmin_1_end_opt: never let an idle lane win the max */
       int irow = 0;
       int licol = 0;
       int j = threadIdx.x + 1;
@@ -2879,8 +2879,15 @@ __device__ void __forceinline__ mrqmin_1_end_opt(freq_context * __restrict__ CUD
 
   for(int i = 1; i <= mf; i++)
     {
-      /* full-pivot search: thread j scans row j */
-      mreal big = 0.0;
+      /* full-pivot search: thread j scans row j. big starts at -1 so a
+         thread with no unpivoted row (big stays -1) can never win the
+         block-wide max against real rows whose largest |value| is 0; with
+         big = 0 such a thread's (irow=0, icol=0) could be picked, making
+         row 0 of the shared matrix (never written) the pivot row and the
+         result dependent on stale shared memory. A genuine all-zero column
+         now selects a real row, hits piv == 0 and takes the singular exit.
+         (upstream AsteroidsAtHome/PeriodSearch 4631b5f) */
+      mreal big = -1.0;
       int irow = 0, licol = 0;
       int j = 1 + tid;
       if(j <= mf && ipiv[j] != 1)
